@@ -2,7 +2,7 @@ name: Test standalone collector
 on:
   push:
     branches: [main]
-    paths: ['collectors/**', 'scripts/**', 'tests/**', 'requirements*.txt', '.github/workflows/**']
+    paths: ['collectors/**', 'scripts/**', 'tests/**', 'data/twitch_category_verification.json', 'requirements*.txt', '.github/workflows/**']
   pull_request:
   workflow_dispatch:
 permissions:

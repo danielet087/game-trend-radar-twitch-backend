@@ -1,6 +1,6 @@
 name: Collect Twitch live data
 
-# Collection remains paused: enable a schedule only after configuring Secrets.
+# First validate the new threshold collector manually before enabling its hourly schedule.
 # CI tests run separately and do not call the live API.
 on:
   workflow_dispatch:
@@ -49,7 +49,7 @@ jobs:
         env:
           TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
-        run: python -m scripts.update_twitch --global-pages 10 --tracked-pages 50 --top-games 100 --output output/twitch_live.json
+        run: python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.json
       - name: Validate JSON
         if: steps.credentials.outputs.configured == 'true'
         run: python -m json.tool output/twitch_live.json > /dev/null
@@ -72,7 +72,7 @@ jobs:
             exit 0
           fi
           bash scripts/publish_frontend.sh output/twitch_live.json
-          echo '### Twitch: 已收集並發布 data/twitch_live.json。' >> "$GITHUB_STEP_SUMMARY"
+          echo '### Twitch: 已發布最新候選與每小時歷史紀錄。' >> "$GITHUB_STEP_SUMMARY"
       - name: Report failure
         if: failure()
         run: |

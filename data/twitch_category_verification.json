@@ -1,0 +1,276 @@
+{
+  "schema_version": 1,
+  "note": "Explicit observations from the rendered public directory. This is a partial directory, not a complete list of NEW/non-NEW games. Absence from this registry means pending. Badges are cached for 24 hours maximum; no release-date inference.",
+  "observations": {
+    "18122": {
+      "name": "World of Warcraft",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "21779": {
+      "name": "League of Legends",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "27471": {
+      "name": "Minecraft",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "27546": {
+      "name": "World of Tanks",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "29595": {
+      "name": "Dota 2",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "32399": {
+      "name": "Counter-Strike",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "32982": {
+      "name": "Grand Theft Auto V",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "33214": {
+      "name": "Fortnite",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "263490": {
+      "name": "Rust",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "460630": {
+      "name": "Rainbow Six Siege",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "491487": {
+      "name": "Dead by Daylight",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "491931": {
+      "name": "Escape from Tarkov",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "498566": {
+      "name": "Slots",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "499973": {
+      "name": "Always On",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "508455": {
+      "name": "Valheim",
+      "status": "new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": "全新"
+    },
+    "509658": {
+      "name": "Just Chatting",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "509663": {
+      "name": "Special Events",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "509672": {
+      "name": "IRL",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "511224": {
+      "name": "Apex Legends",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "512710": {
+      "name": "Call of Duty: Warzone",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "513143": {
+      "name": "Teamfight Tactics",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "515025": {
+      "name": "Overwatch",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "516575": {
+      "name": "VALORANT",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "123184772": {
+      "name": "EA Sports FC 27",
+      "status": "new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": "全新"
+    },
+    "501028374": {
+      "name": "Teach My Little Sister How to Drive",
+      "status": "new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": "全新"
+    },
+    "676802825": {
+      "name": "Big Walk",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "743893402": {
+      "name": "WARDOGS",
+      "status": "new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": "全新"
+    },
+    "1267582829": {
+      "name": "Aniimo",
+      "status": "new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": "全新"
+    },
+    "1282866981": {
+      "name": "Delta Force",
+      "status": "not_new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": null
+    },
+    "1960720223": {
+      "name": "SILENT HILL: townfall",
+      "status": "new",
+      "source": "twitch_directory_dom",
+      "source_url": "https://www.twitch.tv/directory?sort=VIEWER_COUNT",
+      "observed_at": "2026-09-28T16:11:31Z",
+      "expires_at": "2026-09-29T16:11:31Z",
+      "badge_text": "全新"
+    }
+  }
+}

@@ -31,7 +31,11 @@ def test_publish_retry_preserves_concurrent_frontend_changes(tmp_path):
     config = tmp_path/'gitconfig'
     config.write_text(f'[url "{remote.as_uri()}"]\n\tinsteadOf = https://github.com/danielet087/game-trend-radar.git\n')
     snapshot = tmp_path/f'{PLATFORM}_live.json'
-    snapshot.write_text('{"source":"test fixture", "top_games":[]}')
+    snapshot.write_text(json.dumps({
+        "schema_version": 2, "generated_at": "2026-09-28T16:30:00Z", "collection_started_at": "2026-09-28T16:29:00Z",
+        "min_viewers": 7000, "coverage": {"collection_complete": True, "stop_reason": "category_directory_exhausted"},
+        "candidate_games": [], "top_games": [],
+    }))
     real_git = shutil.which('git')
     wrapper_dir = tmp_path/'bin'
     wrapper_dir.mkdir()
@@ -61,7 +65,10 @@ os.execv(real,[real,*sys.argv[1:]])
     assert git('--git-dir',remote,'show','main:data/catalog.json') == '{"version": 2}'
     assert git('--git-dir',remote,'show','main:data/other-live.json') == '{"keep": true}'
     assert json.loads(git('--git-dir',remote,'show',f'main:data/{PLATFORM}_live.json'))['top_games'] == []
-    assert git('--git-dir',remote,'diff-tree','--no-commit-id','--name-only','-r','main') == f'data/{PLATFORM}_live.json'
+    changed = set(git('--git-dir',remote,'diff-tree','--no-commit-id','--name-only','-r','main').splitlines())
+    assert changed == {'data/twitch_live.json', 'data/twitch_history/2026-09-29.json'}
+    history = json.loads(git('--git-dir',remote,'show','main:data/twitch_history/2026-09-29.json'))
+    assert len(history['hours']) == 1
     assert 'fixture-only-token' not in run.stdout+run.stderr
 
 

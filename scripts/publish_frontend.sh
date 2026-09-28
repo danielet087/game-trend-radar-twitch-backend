@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish exactly one live-data file against the latest frontend branch.
+# Merge only Twitch latest/history against the latest frontend branch.
 set -euo pipefail
 source_file="$(realpath "${1:-output/twitch_live.json}")"
 test -s "$source_file"
@@ -19,15 +19,15 @@ for attempt in 1 2 3 4 5; do
   git -C "$work_dir/frontend" fetch origin main
   git -C "$work_dir/frontend" reset --hard origin/main
   mkdir -p "$work_dir/frontend/data"
-  cp "$source_file" "$work_dir/frontend/data/twitch_live.json"
-  git -C "$work_dir/frontend" add -- data/twitch_live.json
+  history_path="$(cd "$script_dir/.." && python -m scripts.store_twitch_snapshot "$source_file" "$work_dir/frontend")"
+  git -C "$work_dir/frontend" add -- data/twitch_live.json "$history_path"
   if git -C "$work_dir/frontend" diff --cached --quiet; then
     echo 'twitch data is already up to date.'
     exit 0
   fi
   git -C "$work_dir/frontend" commit -m 'data: update twitch live metrics'
   if bash "$script_dir/git_frontend_auth.sh" -C "$work_dir/frontend" push origin HEAD:main; then
-    echo 'Published data/twitch_live.json.'
+    echo "Published data/twitch_live.json and $history_path."
     exit 0
   fi
   echo "Push failed on attempt $attempt; retrying against latest frontend."
