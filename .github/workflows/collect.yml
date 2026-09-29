@@ -47,12 +47,28 @@ jobs:
       - name: Run offline tests
         if: steps.credentials.outputs.configured == 'true'
         run: python -m pytest -q
+      - name: Restore daily follower counts
+        if: steps.credentials.outputs.configured == 'true'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/twitch_followers.json
+          key: twitch-followers-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            twitch-followers-v1-
       - name: Collect Twitch
         if: steps.credentials.outputs.configured == 'true'
         env:
           TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
         run: python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.json
+      - name: Save follower lookup progress
+        if: always() && steps.credentials.outputs.configured == 'true' && hashFiles('.cache/twitch_followers.json') != ''
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/twitch_followers.json
+          key: twitch-followers-v1-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Validate JSON
         if: steps.credentials.outputs.configured == 'true'
         run: python -m json.tool output/twitch_live.json > /dev/null

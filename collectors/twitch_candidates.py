@@ -17,6 +17,7 @@ from typing import Any
 import requests
 
 from collectors.twitch_live import TwitchClient
+from collectors.twitch_audience import CACHE_PATH, FollowerResolver, attach_filtered_audience
 from collectors.twitch_newness import (
     RELEASE_DATES_PATH, attach_experiments, load_release_dates, parse_timestamp, timestamp,
 )
@@ -86,7 +87,7 @@ class PageReader:
         return rows, cursor or None
 
 
-def category_metrics(reader: PageReader, game_id: str, max_pages: int = 150) -> dict:
+def category_metrics(reader: PageReader, game_id: str, max_pages: int = 150, *, retain_channels: bool = False) -> dict:
     channels: dict[str, dict] = {}
     seen_cursors: set[str] = set()
     after = None
@@ -118,7 +119,7 @@ def category_metrics(reader: PageReader, game_id: str, max_pages: int = 150) -> 
         raise IncompleteCollection(f"Stream page limit reached for game {game_id}")
     counts = [row["viewer_count"] for row in channels.values()]
     languages = Counter(str(row.get("language") or "other") for row in channels.values())
-    return {
+    result = {
         "viewer_count": sum(counts), "streamer_count": len(counts),
         "median_viewer_count": median(counts) if counts else None,
         "language_streamers": dict(languages.most_common()),
@@ -126,6 +127,10 @@ def category_metrics(reader: PageReader, game_id: str, max_pages: int = 150) -> 
         "pagination_complete": True, "stream_pages": page_index + 1,
         "duplicate_broadcasters_removed": duplicates,
     }
+    if retain_channels:
+        # Private, in-memory input only. Removed before a candidate is assembled.
+        result["_channels"] = list(channels.values())
+    return result
 
 
 def release_hints(client: TwitchClient, games: list[dict], now: datetime) -> tuple[dict, str]:
@@ -176,6 +181,8 @@ def collect_candidates(
     registry_path: str | Path = REGISTRY_PATH, include_release_hints: bool = True,
     release_dates_path: str | Path = RELEASE_DATES_PATH,
     client: TwitchClient | None = None, now: datetime | None = None, category_page_size: int = 100,
+    include_filtered_audience: bool = False, followers_cache_path: str | Path = CACHE_PATH,
+    followers_max_calls: int = 1000, followers_max_seconds: float = 300,
 ) -> dict[str, Any]:
     if min(min_viewers, max_category_pages, max_stream_pages, max_api_calls) < 1 or not 1 <= category_page_size <= 100:
         raise ValueError("Threshold and limits must be positive; page size must be 1..100")
@@ -185,6 +192,7 @@ def collect_candidates(
     client = client or TwitchClient(client_id, client_secret, request_interval=0.3)
     reader = PageReader(client, max_api_calls)
     candidates_by_id, excluded_by_id = {}, {}
+    channels_by_game: dict[str, list[dict]] = {}
     seen_ids, seen_cursors = set(), set()
     measured_ids = set()
     below_ids = set()
@@ -212,6 +220,7 @@ def collect_candidates(
             verification = verification_for(game_id, observations, now or datetime.now(timezone.utc))
             if game_id in NON_GAME_IDS or verification["status"] == "not_new":
                 candidates_by_id.pop(game_id, None)
+                channels_by_game.pop(game_id, None)
                 below_ids.discard(game_id)
                 excluded_by_id[game_id] = {
                     "game_id": game_id, "game_name": game["name"],
@@ -223,7 +232,8 @@ def collect_candidates(
             excluded_by_id.pop(game_id, None)
             # Re-measure cross-page duplicates. Merely seeing one duplicate must
             # not disable threshold termination on every subsequent page.
-            metrics = category_metrics(reader, game_id, max_stream_pages)
+            metrics = category_metrics(reader, game_id, max_stream_pages, retain_channels=include_filtered_audience)
+            channels = metrics.pop("_channels", None)
             measured_count += 1
             measured_ids.add(game_id)
             page_measured += 1
@@ -232,6 +242,7 @@ def collect_candidates(
                 below_count += 1
                 below_ids.add(game_id)
                 candidates_by_id.pop(game_id, None)
+                channels_by_game.pop(game_id, None)
                 continue
             page_qualified += 1
             below_ids.discard(game_id)
@@ -240,6 +251,8 @@ def collect_candidates(
                 "box_art_url": game.get("box_art_url"), "igdb_id": game.get("igdb_id") or None,
                 "verification": verification, **metrics,
             }
+            if channels is not None:
+                channels_by_game[game_id] = channels
         LOGGER.info("Category page %d: %d scanned, %d measured, %d qualifying", page_index + 1, len(games), page_measured, page_qualified)
         if not cursor:
             stop_reason = "category_directory_exhausted"
@@ -268,6 +281,12 @@ def collect_candidates(
     queue.sort(key=lambda row: (priority[row.get("release_evidence", {}).get("release_band", "unknown")], -row["viewer_count"]))
     finished = now or datetime.now(timezone.utc)
     experiment = attach_experiments(candidates, excluded, hints, release_dates, finished)
+    follower_coverage = None
+    if include_filtered_audience:
+        resolver = FollowerResolver(client, followers_cache_path, max_calls=followers_max_calls,
+                                    max_seconds=followers_max_seconds, utcnow=(lambda: now) if now else None)
+        follower_coverage = attach_filtered_audience(candidates, channels_by_game, resolver)
+        finished = now or datetime.now(timezone.utc)
     return {
         "schema_version": 2, "generated_at": timestamp(finished), "collection_started_at": timestamp(clock),
         "source": "Twitch Helix API", "min_viewers": min_viewers,
@@ -278,7 +297,10 @@ def collect_candidates(
             "duplicate_category_remeasurements": measured_count - len(measured_ids),
             "below_threshold_measurements": below_count,
             "below_threshold_count": len(below_ids),
-            "excluded_before_metrics_count": len(excluded), "helix_calls_excluding_retries": reader.calls,
+            "excluded_before_metrics_count": len(excluded),
+            "helix_calls_excluding_retries": reader.calls + (follower_coverage["follower_lookup_calls"] if follower_coverage else 0),
+            "census_helix_calls_excluding_retries": reader.calls,
+            **({"filtered_audience": follower_coverage} if follower_coverage else {}),
             "global_metrics_are_sampled": False, "is_simultaneous_global_snapshot": False,
             "all_categories_enumerated": stop_reason == "category_directory_exhausted",
             "discovery_note": "Uses Helix category ranking and stops after a whole measured page below threshold. Live rankings and streams can change during pagination; this is not proof of a simultaneous, exhaustive global census.",

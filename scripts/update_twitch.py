@@ -7,6 +7,7 @@ import os
 from collectors.twitch_live import write_json
 from collectors.twitch_candidates import REGISTRY_PATH, collect_candidates as collect_twitch
 from collectors.twitch_newness import RELEASE_DATES_PATH
+from collectors.twitch_audience import CACHE_PATH
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,6 +20,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verification-registry", default=str(REGISTRY_PATH))
     parser.add_argument("--release-dates", default=str(RELEASE_DATES_PATH), help="Dated Twitch originalReleaseDate export for the 14-day trial")
     parser.add_argument("--no-release-hints", action="store_true")
+    parser.add_argument("--followers-cache", default=str(CACHE_PATH), help="Runner-local daily follower-total cache")
+    parser.add_argument("--followers-max-calls", type=int, default=1000, help="Separate follower enrichment request budget")
+    parser.add_argument("--followers-max-seconds", type=float, default=300, help="Follower enrichment time budget, checked before each request")
+    parser.add_argument("--no-filtered-audience", action="store_true", help="Disable follower-qualified statistics (CLI default: enabled)")
     return parser
 
 
@@ -44,6 +49,10 @@ def main() -> None:
         registry_path=args.verification_registry,
         release_dates_path=args.release_dates,
         include_release_hints=not args.no_release_hints,
+        include_filtered_audience=not args.no_filtered_audience,
+        followers_cache_path=args.followers_cache,
+        followers_max_calls=args.followers_max_calls,
+        followers_max_seconds=args.followers_max_seconds,
     )
     path = write_json(payload, args.output)
     experiment = payload["newness_experiment"]
@@ -57,6 +66,11 @@ def main() -> None:
     print(f"14-day trial: Twitch dates {twitch_trial['evaluated_candidates']} evaluated / "
           f"{twitch_trial['unknown_candidates']} unknown; IGDB comparison {igdb_trial['evaluated_candidates']} evaluated. "
           "Date predictions are not confirmed Twitch NEW badges.")
+    audience = payload["coverage"].get("filtered_audience")
+    if audience:
+        print(f"Filtered audience: {audience['complete_categories']} complete / {audience['partial_categories']} partial categories; "
+              f"{audience['follower_lookup_calls']} follower lookups, {audience['follower_cache_hits']} cache hits; "
+              f"{audience['stop_reason']}. Only followers > 1,000 and viewers >= 10 qualify.")
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as summary:
@@ -69,7 +83,7 @@ def main() -> None:
                 f"- 暫時排除：{len(payload['excluded_games'])} 類\n"
                 f"- Helix 呼叫（不含重試）：{payload['coverage']['helix_calls_excluding_retries']}\n"
                 f"- 掃描停止原因：{payload['coverage']['stop_reason']}\n\n"
-                "每款候選都已翻完直播分頁，包含零觀眾台；中位數不是平均數。\n"
+                "全體總觀眾、開台數及原始中位數保留所有直播台；篩選中位數使用下方獨立條件。\n"
                 "新標記仍以附時間的 Twitch 直接觀察為準。\n\n"
                 "### 14 天日期實驗（不等於官方 NEW）\n\n"
                 f"- Twitch 原始日期：{twitch_trial['evaluated_candidates']} 款可判定、{twitch_trial['unknown_candidates']} 款缺資料或已過期\n"
@@ -79,6 +93,18 @@ def main() -> None:
                 "Glance 的判斷為日期差 < 14 天，包含未來日期；滿 14 天即不符合。\n"
                 "缺少 Twitch 原始日期時保持未知；IGDB 結果分開顯示，不補成 Twitch 原始日期。\n"
             )
+            if audience:
+                summary.write(
+                    "\n### 篩選中位數\n\n"
+                    "- 條件：免費追隨者 > 1,000，且當次觀眾 ≥ 10（0～9 人不納入）\n"
+                    f"- 完整分類：{audience['complete_categories']}；待補齊分類：{audience['partial_categories']}\n"
+                    f"- 追隨數 API 查詢：{audience['follower_lookup_calls']}；24 小時內快取命中：{audience['follower_cache_hits']}\n"
+                    f"- 追隨數查詢失敗：{audience['follower_lookup_failures']}；停止原因：{audience['stop_reason']}\n"
+                    f"- 快取保存：{'成功' if audience['cache_saved'] else '失敗'}\n\n"
+                    "任何 ≥10 觀眾的頻道追隨數未知時，該分類中位數暫不提供，避免使用偏差的部分樣本。\n"
+                    "合格樣本為零時中位數也是空值；未知與空樣本皆不填 0。\n"
+                    "舊歷史不倒填、不以原始中位數冒充新指標。\n"
+                )
 
 
 if __name__ == "__main__":

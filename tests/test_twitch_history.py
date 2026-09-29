@@ -106,3 +106,66 @@ def test_game_leaving_candidates_keeps_earlier_history_without_zero_fill(tmp_pat
     assert hours["2026-09-28T16:00:00Z"]["games"][0]["viewer_count"] == 10000
     assert "2026-09-28T17:00:00Z" not in hours
     assert hours["2026-09-28T18:00:00Z"]["games"] == []
+
+
+def filtered_audience(**changes):
+    return {
+        "rule": "followers_gt_1000_viewers_gte_10_v1",
+        "min_followers_exclusive": 1000, "min_viewers_inclusive": 10,
+        "followers_max_age_hours": 24, "status": "complete",
+        "median_viewer_count": 20, "eligible_streamer_count": 2,
+        "eligible_viewer_count": 40, "excluded_low_viewer_count": 1,
+        "excluded_low_follower_count": 2, "unknown_follower_count": 0,
+        **changes,
+    }
+
+
+@pytest.mark.parametrize("audience", [
+    filtered_audience(),
+    filtered_audience(status="partial", median_viewer_count=None,
+                      excluded_low_follower_count=1, unknown_follower_count=1),
+    filtered_audience(median_viewer_count=None, eligible_streamer_count=0,
+                      eligible_viewer_count=0, excluded_low_follower_count=4),
+])
+def test_history_preserves_filtered_population_without_rewriting_older_hours(tmp_path, audience):
+    relative = store_snapshot(snapshot("2026-09-28T16:07:00Z"), tmp_path)
+    new = snapshot("2026-09-28T17:07:00Z")
+    new["candidate_games"][0]["filtered_audience"] = audience
+    store_snapshot(new, tmp_path)
+    hours = json.loads((tmp_path/relative).read_text())["hours"]
+    old_row = hours["2026-09-28T16:00:00Z"]["games"][0]
+    new_row = hours["2026-09-28T17:00:00Z"]["games"][0]
+    assert "filtered_audience" not in old_row
+    assert old_row["median_viewer_count"] == new_row["median_viewer_count"] == 300
+    assert new_row["filtered_audience"] == audience
+    assert new_row["viewer_count"] == 10000
+    assert new_row["streamer_count"] == 5
+
+
+@pytest.mark.parametrize("changes", [
+    {"rule": "followers_gte_1000"},
+    {"min_followers_exclusive": 999},
+    {"min_viewers_inclusive": 9},
+    {"followers_max_age_hours": 48},
+    {"eligible_streamer_count": True},
+    {"excluded_low_follower_count": -1},
+    {"unknown_follower_count": 1},
+    {"unknown_follower_count": 1, "excluded_low_follower_count": 1},
+    {"unknown_follower_count": 1, "excluded_low_follower_count": 1, "status": "partial"},
+    {"status": "partial", "median_viewer_count": None},
+    {"median_viewer_count": None},
+    {"median_viewer_count": 9},
+    {"median_viewer_count": float("nan")},
+    {"eligible_viewer_count": 19},
+    {"eligible_viewer_count": 10001},
+    {"eligible_streamer_count": 0, "eligible_viewer_count": 1,
+     "excluded_low_follower_count": 4, "median_viewer_count": None},
+])
+def test_invalid_filtered_metrics_never_replace_last_snapshot(tmp_path, changes):
+    store_snapshot(snapshot(), tmp_path)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    new = snapshot("2026-09-28T17:07:00Z")
+    new["candidate_games"][0]["filtered_audience"] = filtered_audience(**changes)
+    with pytest.raises(ValueError):
+        store_snapshot(new, tmp_path)
+    assert before == {p: p.read_bytes() for p in tmp_path.rglob("*.json")}

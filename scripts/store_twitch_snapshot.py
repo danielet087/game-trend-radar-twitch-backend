@@ -4,12 +4,40 @@ from __future__ import annotations
 import argparse
 from datetime import timedelta, timezone
 import json
+import math
 from pathlib import Path
 
 from collectors.twitch_candidates import parse_timestamp, timestamp
 from collectors.twitch_live import write_json
 
 TAIPEI = timezone(timedelta(hours=8))
+
+
+def validate_filtered_audience(value: dict, *, viewers: int, streamers: int) -> None:
+    """Keep the new population explicit; incomplete lookups cannot claim a median."""
+    if not isinstance(value, dict) or value.get("rule") != "followers_gt_1000_viewers_gte_10_v1":
+        raise ValueError("Invalid filtered audience rule")
+    for key, expected in (("min_followers_exclusive", 1000), ("min_viewers_inclusive", 10),
+                          ("followers_max_age_hours", 24)):
+        if type(value.get(key)) is not int or value[key] != expected:
+            raise ValueError("Invalid filtered audience threshold")
+    partitions = ("eligible_streamer_count", "excluded_low_viewer_count",
+                  "excluded_low_follower_count", "unknown_follower_count")
+    if any(type(value.get(key)) is not int or value[key] < 0 for key in partitions):
+        raise ValueError("Invalid filtered audience counts")
+    if sum(value[key] for key in partitions) != streamers:
+        raise ValueError("Filtered audience counts do not match the census")
+    eligible, unknown = value["eligible_streamer_count"], value["unknown_follower_count"]
+    total, middle = value.get("eligible_viewer_count"), value.get("median_viewer_count")
+    if type(total) is not int or not eligible * 10 <= total <= viewers or (eligible == 0 and total != 0):
+        raise ValueError("Invalid filtered audience viewer total")
+    if value.get("status") != ("partial" if unknown else "complete"):
+        raise ValueError("Filtered audience status does not match coverage")
+    if unknown or eligible == 0:
+        if middle is not None:
+            raise ValueError("An incomplete or empty audience cannot claim a median")
+    elif type(middle) not in (int, float) or not math.isfinite(middle) or not 10 <= middle <= total:
+        raise ValueError("Invalid filtered audience median")
 
 
 def validate_snapshot(payload: dict) -> None:
@@ -33,6 +61,8 @@ def validate_snapshot(payload: dict) -> None:
             raise ValueError("Invalid candidate metrics")
         if type(middle) not in (float, int) or not 0 <= middle <= viewers:
             raise ValueError("Invalid median")
+        if "filtered_audience" in row:
+            validate_filtered_audience(row["filtered_audience"], viewers=viewers, streamers=streamers)
 
 
 def store_snapshot(payload: dict, frontend: Path) -> str:
@@ -58,7 +88,7 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
                 {**{key: row[key] for key in (
                     "game_id", "game_name", "viewer_count", "streamer_count", "median_viewer_count",
                     "measurement_started_at", "measurement_finished_at", "verification",
-                )}, **({"release_experiment": row["release_experiment"]} if "release_experiment" in row else {})}
+                )}, **{key: row[key] for key in ("release_experiment", "filtered_audience") if key in row}}
                 for row in payload["candidate_games"]
             ],
         }

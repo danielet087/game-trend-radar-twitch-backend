@@ -1,6 +1,6 @@
 # Game Trend Radar — Twitch 獨立後端
 
-找出總觀眾數達 **7,000 人**的遊戲候選，紀錄總觀眾數、開台實況主人數及**每台觀眾數的中位數**，並獨立管理 Twitch「全新」標記的驗證狀態。
+找出總觀眾數達 **7,000 人**的遊戲候選，紀錄總觀眾數、開台實況主人數及**每台觀眾數的中位數**，並獨立管理 Twitch「全新」標記的驗證狀態。新增顯示用的**篩選中位數**：只納入免費追隨者 **> 1,000**、且當次觀眾 **≥ 10** 的直播台。
 
 ## 執行狀態
 
@@ -17,6 +17,7 @@
 3. 對剩餘分類逐一查詢 `Get Streams`，跟隨游標翻完直播分頁，以實況主 ID 去重，再計算總觀眾數與中位數。保留總觀眾數 **≥ 7,000** 的候選。
 4. 有有效「全新」觀察紀錄的候選列為 `new`；其他候選列為 `pending`。待驗證候選同樣保留人數與歷史，避免等驗證完成才開始記錄。
 5. 批次查詢候選及仍有有效官方觀察的排除分類之 IGDB 首次發售日期，用來排列驗證優先順序，並進行下述 14 天平行試算。官方已確認全新的遊戲也保留在試算中，才能看見日期規則與官方標記的分歧。
+6. 對已達 7,000 人的候選計算篩選指標。先排除當次觀眾 0～9 人的台，再查 ≥10 人頻道的公開追隨總數；恰好 1,000 名追隨者不符合。優先處理官方 NEW、接著日期實驗有新作線索的候選，最後補其他候選。同一實況主跨遊戲共用快取與本輪查詢結果。
 
 **IGDB 發售日期不能證明 Twitch 的「全新」標記。** 例如本次目錄觀察中，Valheim 也有該標記。因此不以「上市超過 30 天」自動排除。IGDB 失敗、沒有 IGDB ID、或不在先前目錄樣本內，都維持待驗證。
 
@@ -65,10 +66,25 @@ python -m scripts.import_twitch_release_dates saved-response.json \
 | `viewer_count` | 同一分類所有取得的直播台觀眾數總和 |
 | `streamer_count` | 以 `user_id` 去重後的直播實況主人數，包含 0 觀眾台 |
 | `median_viewer_count` | 所有這些台的觀眾數排序後的中位數；偶數台取中央兩個值的平均，並非全部台的平均觀眾數 |
+| `filtered_audience.median_viewer_count` | 追隨者 >1,000 且觀眾 ≥10 的台之中位數；追隨資料不完整或合格樣本為零時為 `null` |
+| `filtered_audience.eligible_streamer_count` / `eligible_viewer_count` | 已確認符合條件的台數／其觀眾數總和；`partial` 時僅為已知部分 |
+| `filtered_audience.excluded_low_viewer_count` | 當次觀眾 0～9 人，先行排除、不查追隨數的台數 |
+| `filtered_audience.excluded_low_follower_count` | 當次觀眾 ≥10，但追隨者 ≤1,000 的台數 |
+| `filtered_audience.unknown_follower_count` / `status` | 當次觀眾 ≥10 但追隨數未知的台數；有未知即為 `partial`，否則 `complete` |
 | `verification.status` | `new`：有效的全新觀察；`pending`：尚未確認或觀察已過期 |
 | `measurement_started_at` / `measurement_finished_at` | 該分類的分頁量測期間 |
 
 每個候選都翻完直播分頁，沒有只取前 100 台。但直播人數與分類排序會在分頁期間變動；去重無法保證找回期間漏過的直播，因此不能稱為同一瞬間的完整普查。
+
+### 追隨門檻與缺值處理
+
+7,000 人入選門檻、全體總觀眾及全體開台數仍採完整分類的量測，新的中位數獨立存於 `filtered_audience`，規則版本為 `followers_gt_1000_viewers_gte_10_v1`。四種台數（合格、低觀眾、低追隨、未知）相加等於原始開台數。只要存在追隨數未知的待判定台，就不提供篩選中位數，避免優先查大台或預算耗盡產生偏差。查不到追隨數不代表 0，也不沿用過期值；全數排除時中位數顯示空值。
+
+使用 Helix `GET channels/followers?broadcaster_id=...` 的公開 `total`，沿用既有 app access token，不查付費訂閱數、不取得追隨者名單、不使用 `user_id` 查詢條件。401／403 授權不符、429 限流時立即停止本輪補充；其他連續 3 次失敗也停止。失敗維持未知，完整的基礎量測仍可發布。
+
+成功查得的追隨總數保存到 runner 的 `.cache/twitch_followers.json`，以實際查詢時間判斷 24 小時有效期。快取只含頻道 ID、`total` 及 `observed_at`，只保存有效成功結果；未知與失敗不持久化、超過 24 小時或未來時間的資料不使用。GitHub Actions 還原前次快取，完成後保存新快取。此快取不是前端公開資料，也不保存原始直播名單或追隨者身分。
+
+補充追隨數另有每輪 1,000 次／300 秒預算，時間在每次請求前檢查，進行中的單次 HTTP 請求仍受 timeout 約束。不會為耗盡預算阻止基礎快照發布；首次或快取過期可能顯示「待補齊」，後續排程使用已完成的快取繼續補查。`coverage.filtered_audience` 紀錄快取命中、API 查詢、失敗、完整／未完整分類與停止原因。`helix_calls_excluding_retries` 包含此次補充查詢；原分類掃描次數另列於 `census_helix_calls_excluding_retries`。
 
 分類探索會在目錄結束，或**整頁已量測分類都低於門檻，且至少量測一個本次新出現分類**時停止。跨頁重複分類重新量測；如果仍達標就繼續，若整頁都是已排除或重複分類也繼續。候選依 ID 去重，重複量測採較新的結果。這是利用 API 排名縮小探索範圍的策略，不保證掃描期間任何時刻曾超過門檻的遊戲都被捕捉；JSON 會記錄 `stop_reason`、`all_categories_enumerated` 與重複量測次數。
 
@@ -86,6 +102,8 @@ Helix 的直播語言不等於主播所在地。目前提供 `language_streamers
 `candidate_games` 包含所有達標且未被排除的候選；`top_games` 只含已確認全新的候選；`pending_verification` 是依發售線索與觀眾數排序的待查 ID；`excluded_games` 記錄預先排除的分類。排除項目不再量測，所以不能解讀為也達到 7,000 人。
 
 歷史保存候選的三項指標、量測時間及**當次**驗證狀態，不會事後把過去的 `pending` 改寫成已確認。同一小時重跑只接受較新的結果，跨小時保留；較晚完成的舊資料不會倒退最新檔。未出現在某小時的遊戲不會被填成 0 人；它可能低於門檻、被排除或未在當次探索範圍。
+
+新歷史另外保存當次 `filtered_audience`（規則、樣本台數、完整性與中位數）。舊歷史沒有頻道層級資料，無法回頭套用新門檻；舊中位數不會補成新指標。查詢未補齊的時段保留 `partial` 與 `null`，不以較晚的追隨數重算或倒填。
 
 **歷史持續累積，不設 24 小時或 30 天刪除期限。** 每個台灣日期各有一份歷史檔，更新當天時不刪除前一天、前一月或更早的檔案。每個小時保留最新一次成功快照，包括當時的候選、官方驗證狀態與兩種日期推算；新進榜及之後不再入列的遊戲，其已保存紀錄均保留。收集失敗的時段保持缺測，不複製上一筆也不補零。前端實驗頁目前查看最近 24 小時，並不代表只保存 24 小時。
 
@@ -122,10 +140,14 @@ python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.j
 | `--min-viewers` | `7000` | 候選總觀眾數門檻，包含恰好達標 |
 | `--max-category-pages` | `5` | 分類頁上限，每頁最多 100 類 |
 | `--max-stream-pages` | `150` | 每類直播分頁上限，每頁最多 100 台 |
-| `--max-api-calls` | `1200` | Helix 邏輯呼叫上限，不含 OAuth、重試與 IGDB |
+| `--max-api-calls` | `1200` | 基礎分類／直播掃描的 Helix 邏輯呼叫上限，不含 OAuth、重試、IGDB 與獨立追隨查詢 |
 | `--verification-registry` | 專案的驗證 JSON | 直接觀察紀錄檔 |
 | `--release-dates` | `data/twitch_release_dates.json` | 有來源與擷取時間的 Twitch 原始發售日期匯入檔 |
 | `--no-release-hints` | 不啟用 | 加上此旗標即可略過 IGDB |
+| `--followers-cache` | `.cache/twitch_followers.json` | 追隨總數 24 小時快取，只保存在 runner／Actions cache |
+| `--followers-max-calls` | `1000` | 每輪追隨總數查詢預算，可設 0 只使用有效快取 |
+| `--followers-max-seconds` | `300` | 補充階段時間預算，每次請求前檢查 |
+| `--no-filtered-audience` | 不啟用 | CLI 預設計算篩選指標；加上此旗標可略過，原指標不變 |
 
 本機收集不需要發布 Token。只有執行 `bash scripts/publish_frontend.sh output/twitch_live.json` 才需要 `FRONTEND_REPO_TOKEN`。
 
@@ -134,6 +156,7 @@ python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.j
 原始 Twitch 客戶端拆自 `danielet087/game-trend-radar-backend` 的 `86ff4fa9d15aa8c8b9756a102b5ea810241a1de6`；目前命令列改用新的候選流程，舊統計 helper 只保留相容性。未搬移舊 Repo 的 Secrets 或 Actions 紀錄。
 
 - [Twitch Helix API：Get Top Games、Get Streams](https://dev.twitch.tv/docs/api/reference)
+- [Twitch Helix API：Get Channel Followers（公開總數與授權差異）](https://dev.twitch.tv/docs/api/reference/#get-channel-followers)
 - [IGDB API：認證與遊戲發售資料](https://api-docs.igdb.com/)
 - [Glance：14 天條件的開源實作](https://github.com/glanceapp/glance/blob/372466c6d75318670dc66e4e452179350fc50c97/internal/glance/widget-twitch-top-games.go)
 - [GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
