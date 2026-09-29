@@ -61,3 +61,13 @@ def test_partial_scan_does_not_overwrite_latest(tmp_path):
     with pytest.raises(ValueError):
         store_snapshot(bad, tmp_path)
     assert (tmp_path/"data/twitch_live.json").read_bytes() == before
+
+
+def test_history_preserves_experiment_without_promoting_pending_to_official_new(tmp_path):
+    payload = snapshot()
+    experiment = {"igdb_first_release_date": {"predicted_new": True, "confirms_twitch_new_badge": False}}
+    payload["candidate_games"][0]["release_experiment"] = experiment
+    path = store_snapshot(payload, tmp_path)
+    row = json.loads((tmp_path/path).read_text())["hours"]["2026-09-28T16:00:00Z"]["games"][0]
+    assert row["release_experiment"] == experiment
+    assert row["verification"]["status"] == "pending"

@@ -55,10 +55,11 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
             "min_viewers": payload["min_viewers"],
             "stop_reason": payload["coverage"]["stop_reason"],
             "games": [
-                {key: row[key] for key in (
+                {**{key: row[key] for key in (
                     "game_id", "game_name", "viewer_count", "streamer_count", "median_viewer_count",
                     "measurement_started_at", "measurement_finished_at", "verification",
-                )} for row in payload["candidate_games"]
+                )}, **({"release_experiment": row["release_experiment"]} if "release_experiment" in row else {})}
+                for row in payload["candidate_games"]
             ],
         }
         history["hours"] = dict(sorted(history["hours"].items()))

@@ -6,7 +6,7 @@
 
 **收集目前維持手動。** 到 Actions → Collect Twitch live data → Run workflow 執行。先確認新版候選收集的實際結果與用量，再啟用每小時排程。目前沒有 cron、push 或 workflow_run 收集觸發器；Test standalone collector 的 push CI 只跑離線測試，不查 API、不發布資料。
 
-舊版收集器已成功連線及發布；這不代表新版候選流程已通過實際 API 測試。每次新版執行會在 Actions Summary 顯示候選數、待驗證數及 Helix 呼叫次數。
+舊版收集器已成功連線及發布；這不代表新版候選流程已通過實際 API 測試。2026-09-29 01:08（台灣）啟動的新版收集在 Helix 呼叫預算耗盡後中止，沒有發布。當時第 2～4 頁各有 99 個新量測分類且皆低於門檻，但跨頁重複分類使停止條件一直不成立。本版改為重新量測重複分類，再判斷門檻，不增加 API 呼叫預算。每次執行會在 Actions Summary 顯示候選數、待驗證數、日期實驗及 Helix 呼叫次數。
 
 ## 收集與驗證流程
 
@@ -14,7 +14,7 @@
 2. 先略過非遊戲分類，以及仍在有效期內、曾直接確認沒有「全新」標記的分類，減少重複查詢。
 3. 對剩餘分類逐一查詢 `Get Streams`，跟隨游標翻完直播分頁，以實況主 ID 去重，再計算總觀眾數與中位數。保留總觀眾數 **≥ 7,000** 的候選。
 4. 有有效「全新」觀察紀錄的候選列為 `new`；其他候選列為 `pending`。待驗證候選同樣保留人數與歷史，避免等驗證完成才開始記錄。
-5. 對待驗證候選批次查 IGDB 首次發售日期，用來排列驗證優先順序。近期發售、尚未發售與日期不明的候選優先；較早發售的候選排在後面。
+5. 批次查詢候選及仍有有效官方觀察的排除分類之 IGDB 首次發售日期，用來排列驗證優先順序，並進行下述 14 天平行試算。官方已確認全新的遊戲也保留在試算中，才能看見日期規則與官方標記的分歧。
 
 **IGDB 發售日期不能證明 Twitch 的「全新」標記。** 例如本次目錄觀察中，Valheim 也有該標記。因此不以「上市超過 30 天」自動排除。IGDB 失敗、沒有 IGDB ID、或不在先前目錄樣本內，都維持待驗證。
 
@@ -25,6 +25,36 @@
 目前種子資料來自 **台灣時間 2026-09-29 00:11:31** 的目錄觀察：30 個分類，其中 6 個有「全新」標記、24 個沒有；僅代表當時實際載入的分類，並非完整目錄。種子資料在 **2026-09-30 00:11:31** 到期。
 
 **目前沒有自動刷新這份標記紀錄的來源。** Twitch 網頁分頁實驗遇到 integrity check，未完成 7,000 人門檻的目錄掃描；本收集器不依賴該網頁爬取。後續可直接核對待驗證候選，在確認卡片標記後更新觀察紀錄；不能把未載入、查不到或缺少資料填成 `not_new`。`new` 與 `not_new` 都必須有直接觀察來源，不接受永久標記。
+
+### 14 天日期實驗
+
+採用 [Glance 的實作條件](https://github.com/glanceapp/glance/blob/372466c6d75318670dc66e4e452179350fc50c97/internal/glance/widget-twitch-top-games.go)：`評估時間 − 發售時間 < 14 × 24 小時`。滿 14 天不符合；未來日期也符合，但另標記 `release_phase: upcoming`，不顯示成已上市。
+
+本版隨每次手動收集產生 `newness_experiment`，並在每款遊戲的 `release_experiment` 中保留兩條獨立結果：
+
+| 來源 | 日期 | 可用狀況 |
+|---|---|---|
+| `twitch_original_release_date` | Twitch 的 `originalReleaseDate` | 目前缺資料；需有來源、擷取時間的既有回應或第三方資料集匯出 |
+| `igdb_first_release_date` | 官方 IGDB API 的 `first_release_date` | 沿用現有 Twitch 憑證批次查詢，單獨列為平行試算，絕不補成 Twitch 原始日期 |
+
+`predicted_new` 為 `true` / `false` / `null`；缺資料、日期不合法、擷取時間在未來，或資料擷取超過 24 小時，都回傳未知 `null`。所有推算都標記 `confirms_twitch_new_badge: false`，不改動 `verification` 或 `top_games`，也不拿推算的 `false` 排除遊戲。實驗結果與人數一併保存到每小時歷史。
+
+`newness_experiment` 列出每種來源可判定／未知的候選數、推算 NEW 的遊戲 ID、尚未上市 ID，以及與有效官方觀察的 `reference_checks`。對照使用**官方標記當時**的時間計算；若日期資料是在較晚時間取得，會標示 `retrospective`，不能解讀成官方規則已驗證。IGDB 與 Twitch 日期的對照分開計數，不能把兩個來源當成兩款遊戲。
+
+#### 匯入 Twitch 原始日期
+
+`data/twitch_release_dates.json` 目前為空，刻意保留缺資料的真實狀態。匯入器只處理已保存的 JSON，不連線抓取 Twitch，不啟用代理或私有 GraphQL 呼叫。支援回應本文的 `data.directoriesWithTags.edges[].node`／`data.game`，以及包含 `categoryId`、`originalReleaseDate`、`scrapedAt` 的第三方資料集陣列。IGDB 的 `first_release_date` 不會被此匯入器接受。
+
+```bash
+python -m scripts.import_twitch_release_dates saved-response.json \
+  --source-name "Twitch response export" \
+  --source-url https://www.twitch.tv/directory \
+  --observed-at 2026-09-29T12:00:00Z
+```
+
+`--observed-at` 必須改成實際擷取時間，不能用匯入時間。第三方每筆已有 `scrapedAt` 時可以省略。來源網址只記公開網址，不含查詢字串；匯入器只保存日期與來源欄位。重複 ID 只接受較新紀錄，同一時間有衝突日期則拒絕。匯入資料提交到 Repo 後，下次手動 workflow 即會使用。
+
+**實際資料取得仍未完成：** 本版能自動做 IGDB 試算；沒有 Twitch 日期匯出時，Twitch 日期實驗的可判定數會是 0。不能把離線測試通過、IGDB 試算完成或先前 6 筆標記觀察，說成已完成官方 NEW 自動確認。
 
 ## 指標定義與範圍
 
@@ -38,7 +68,7 @@
 
 每個候選都翻完直播分頁，沒有只取前 100 台。但直播人數與分類排序會在分頁期間變動；去重無法保證找回期間漏過的直播，因此不能稱為同一瞬間的完整普查。
 
-分類探索會在目錄結束，或**整頁已量測分類都低於門檻**時停止。整頁都是已排除分類，或含跨頁重複分類時，不能作為門檻停止依據。這是利用 API 排名縮小探索範圍的策略，不保證掃描期間任何時刻曾超過門檻的遊戲都被捕捉；JSON 會記錄 `stop_reason` 與 `all_categories_enumerated`。
+分類探索會在目錄結束，或**整頁已量測分類都低於門檻，且至少量測一個本次新出現分類**時停止。跨頁重複分類重新量測；如果仍達標就繼續，若整頁都是已排除或重複分類也繼續。候選依 ID 去重，重複量測採較新的結果。這是利用 API 排名縮小探索範圍的策略，不保證掃描期間任何時刻曾超過門檻的遊戲都被捕捉；JSON 會記錄 `stop_reason`、`all_categories_enumerated` 與重複量測次數。
 
 若達到分類頁數、直播頁數、API 呼叫上限，或發生 API 錯誤、重複游標與無效資料，會中止發布，保留前端上一版。IGDB 僅為輔助資訊，其失敗不會阻止人數資料發布。
 
@@ -88,6 +118,7 @@ python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.j
 | `--max-stream-pages` | `150` | 每類直播分頁上限，每頁最多 100 台 |
 | `--max-api-calls` | `1200` | Helix 邏輯呼叫上限，不含 OAuth、重試與 IGDB |
 | `--verification-registry` | 專案的驗證 JSON | 直接觀察紀錄檔 |
+| `--release-dates` | `data/twitch_release_dates.json` | 有來源與擷取時間的 Twitch 原始發售日期匯入檔 |
 | `--no-release-hints` | 不啟用 | 加上此旗標即可略過 IGDB |
 
 本機收集不需要發布 Token。只有執行 `bash scripts/publish_frontend.sh output/twitch_live.json` 才需要 `FRONTEND_REPO_TOKEN`。
@@ -98,4 +129,5 @@ python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.j
 
 - [Twitch Helix API：Get Top Games、Get Streams](https://dev.twitch.tv/docs/api/reference)
 - [IGDB API：認證與遊戲發售資料](https://api-docs.igdb.com/)
+- [Glance：14 天條件的開源實作](https://github.com/glanceapp/glance/blob/372466c6d75318670dc66e4e452179350fc50c97/internal/glance/widget-twitch-top-games.go)
 - [GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)

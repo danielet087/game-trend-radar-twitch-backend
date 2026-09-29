@@ -6,6 +6,7 @@ import os
 
 from collectors.twitch_live import write_json
 from collectors.twitch_candidates import REGISTRY_PATH, collect_candidates as collect_twitch
+from collectors.twitch_newness import RELEASE_DATES_PATH
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,6 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-stream-pages", type=int, default=150)
     parser.add_argument("--max-api-calls", type=int, default=1200)
     parser.add_argument("--verification-registry", default=str(REGISTRY_PATH))
+    parser.add_argument("--release-dates", default=str(RELEASE_DATES_PATH), help="Dated Twitch originalReleaseDate export for the 14-day trial")
     parser.add_argument("--no-release-hints", action="store_true")
     return parser
 
@@ -40,15 +42,21 @@ def main() -> None:
         max_stream_pages=args.max_stream_pages,
         max_api_calls=args.max_api_calls,
         registry_path=args.verification_registry,
+        release_dates_path=args.release_dates,
         include_release_hints=not args.no_release_hints,
     )
     path = write_json(payload, args.output)
+    experiment = payload["newness_experiment"]
+    twitch_trial, igdb_trial = (experiment[key] for key in ("twitch_original_release_date", "igdb_first_release_date"))
     print(
         f"Twitch collection complete: "
         f"{len(payload['candidate_games'])} qualifying categories, "
         f"{len(payload['top_games'])} verified NEW, "
         f"{len(payload['pending_verification'])} pending -> {path}"
     )
+    print(f"14-day trial: Twitch dates {twitch_trial['evaluated_candidates']} evaluated / "
+          f"{twitch_trial['unknown_candidates']} unknown; IGDB comparison {igdb_trial['evaluated_candidates']} evaluated. "
+          "Date predictions are not confirmed Twitch NEW badges.")
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as summary:
@@ -62,7 +70,14 @@ def main() -> None:
                 f"- Helix 呼叫（不含重試）：{payload['coverage']['helix_calls_excluding_retries']}\n"
                 f"- 掃描停止原因：{payload['coverage']['stop_reason']}\n\n"
                 "每款候選都已翻完直播分頁，包含零觀眾台；中位數不是平均數。\n"
-                "IGDB 日期只供待驗證排序；新標記仍以附時間的 Twitch 直接觀察為準。\n"
+                "新標記仍以附時間的 Twitch 直接觀察為準。\n\n"
+                "### 14 天日期實驗（不等於官方 NEW）\n\n"
+                f"- Twitch 原始日期：{twitch_trial['evaluated_candidates']} 款可判定、{twitch_trial['unknown_candidates']} 款缺資料或已過期\n"
+                f"- Twitch 日期推算 NEW：{len(twitch_trial['predicted_new_game_ids'])} 款，其中尚未發售 {len(twitch_trial['upcoming_game_ids'])} 款\n"
+                f"- IGDB 平行試算：{igdb_trial['evaluated_candidates']} 款可判定，推算 NEW {len(igdb_trial['predicted_new_game_ids'])} 款\n"
+                f"- 與先前官方標記對照：{len(experiment['reference_checks'])} 筆來源／遊戲組合；詳見 JSON，回溯對照不代表官方規則驗證通過\n\n"
+                "Glance 的判斷為日期差 < 14 天，包含未來日期；滿 14 天即不符合。\n"
+                "缺少 Twitch 原始日期時保持未知；IGDB 結果分開顯示，不補成 Twitch 原始日期。\n"
             )
 
 

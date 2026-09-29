@@ -212,3 +212,50 @@ def test_old_release_is_only_evidence_not_a_not_new_verdict():
     assert hints["123"]["release_band"] == "older_release"
     assert hints["123"]["confirms_twitch_new_badge"] is False
     assert "status" not in hints["123"]
+
+
+def test_cross_page_duplicate_is_remeasured_and_does_not_disable_boundary(tmp_path):
+    client = FakeClient([
+        ("games/top", page([game(1), game(2)], "second")),
+        ("streams", page([stream(1, 1, 9000)])),
+        ("streams", page([stream(2, 2, 800)])),
+        ("games/top", page([game(2), game(3)], "third")),
+        ("streams", page([stream(2, 2, 700)])),
+        ("streams", page([stream(3, 3, 300)])),
+    ])
+    result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
+                                registry_path=registry(tmp_path), include_release_hints=False)
+    assert [row["game_id"] for row in result["candidate_games"]] == ["1"]
+    assert result["coverage"]["stop_reason"] == "whole_page_below_threshold"
+    assert result["coverage"]["duplicate_category_remeasurements"] == 1
+    assert len(client.calls) == 6
+
+
+def test_duplicate_that_grows_above_threshold_prevents_early_stop(tmp_path):
+    client = FakeClient([
+        ("games/top", page([game(1), game(2)], "second")),
+        ("streams", page([stream(1, 1, 9000)])),
+        ("streams", page([stream(2, 2, 6000)])),
+        ("games/top", page([game(2), game(3)], "third")),
+        ("streams", page([stream(2, 2, 7500)])),
+        ("streams", page([stream(3, 3, 300)])),
+        ("games/top", page([game(4)])),
+        ("streams", page([stream(4, 4, 7000)])),
+    ])
+    result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
+                                registry_path=registry(tmp_path), include_release_hints=False)
+    assert {row["game_id"] for row in result["candidate_games"]} == {"1", "2", "4"}
+
+
+def test_duplicate_only_page_cannot_establish_boundary(tmp_path):
+    client = FakeClient([
+        ("games/top", page([game(1)], "second")),
+        ("streams", page([stream(1, 1, 9000)])),
+        ("games/top", page([game(1)], "third")),
+        ("streams", page([stream(1, 1, 500)])),
+        ("games/top", page([game(2)])),
+        ("streams", page([stream(2, 2, 9000)])),
+    ])
+    result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
+                                registry_path=registry(tmp_path), include_release_hints=False)
+    assert [row["game_id"] for row in result["candidate_games"]] == ["2"]

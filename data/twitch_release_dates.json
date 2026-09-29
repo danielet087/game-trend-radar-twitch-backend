@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "note": "No Twitch originalReleaseDate export is available yet. Empty records mean unknown, not not-new. IGDB dates are evaluated separately.",
+  "records": {}
+}
