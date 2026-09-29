@@ -2,7 +2,7 @@ name: Test standalone collector
 on:
   push:
     branches: [main]
-    paths: ['collectors/**', 'scripts/**', 'tests/**', 'data/twitch_*.json', 'requirements*.txt', '.github/workflows/**']
+    paths: ['collectors/**', 'scripts/**', 'tests/**', 'scheduler/**', 'data/twitch_*.json', 'requirements*.txt', '.github/workflows/**']
   pull_request:
   workflow_dispatch:
 permissions:
@@ -22,3 +22,7 @@ jobs:
       - run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - run: python -m pytest -q
       - run: bash -n scripts/git_frontend_auth.sh scripts/publish_frontend.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test scheduler/cloudflare/test/*.test.mjs

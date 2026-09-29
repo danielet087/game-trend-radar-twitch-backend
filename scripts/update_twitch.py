@@ -8,6 +8,7 @@ from collectors.twitch_live import write_json
 from collectors.twitch_candidates import REGISTRY_PATH, collect_candidates as collect_twitch
 from collectors.twitch_newness import RELEASE_DATES_PATH
 from collectors.twitch_audience import CACHE_PATH
+from scripts.collection_guard import validate_slot
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--followers-max-seconds", type=float, default=None,
                         help="Optional diagnostic follower time cap; default: collection deadline only")
     parser.add_argument("--no-filtered-audience", action="store_true", help="Disable follower-qualified statistics (CLI default: enabled)")
+    parser.add_argument("--target-slot", type=validate_slot, default=None,
+                        help="Requested UTC hour; actual sampling timestamps remain separate")
+    parser.add_argument("--trigger-source", choices=("manual", "schedule", "cloudflare"), default="manual")
     return parser
 
 
@@ -59,6 +63,13 @@ def main() -> None:
         followers_max_calls=args.followers_max_calls,
         followers_max_seconds=args.followers_max_seconds,
     )
+    if args.target_slot:
+        payload["collection_schedule"] = {
+            "target_slot": args.target_slot,
+            "trigger_source": args.trigger_source,
+            "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        }
     path = write_json(payload, args.output)
     experiment = payload["newness_experiment"]
     twitch_trial, igdb_trial = (experiment[key] for key in ("twitch_original_release_date", "igdb_first_release_date"))

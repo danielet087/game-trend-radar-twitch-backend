@@ -4,6 +4,10 @@
 
 ## 執行狀態
 
+2026-09-30 新增 [Cloudflare 漏跑監控](scheduler/cloudflare/README.md)：每 5 分鐘檢查本小時是否已發布完整基礎量測，缺資料且沒有執行中的工作時才觸發既有 Python workflow。Cloudflare 程式與設定提交到 GitHub **不代表外部排程已啟用**，需先依部署說明設定 Worker 與 `GITHUB_ACTIONS_TOKEN`，再以 Cloudflare 日誌、Actions 的 `cloudflare` 執行名稱與發布 receipt 三者驗證。
+
+所有入口共用 workflow concurrency；工作開始後會解析前端最新 git HEAD，讀取該不可變版本的成功紀錄，再判斷是否需要收集。同一小時已有成功發布時直接略過；舊時段延遲排隊的外部請求略過，不回填歷史直播數。手動 Run workflow 預設也防重複，需要重新取樣時才勾選 `force`。原生 GitHub cron 留作備援。
+
 **已設定每小時 17 分自動收集**（台灣時間，例如 23:17、00:17、01:17）。GitHub Actions 的 cron 為 `17 * * * *`；UTC 與台灣都落在每小時第 17 分，不需另外平移小時。排程可能延遲，因此資料保存實際收集與量測時間，不將延遲結果標成準點觀測。2026-09-29 重新調整 cron；設定已提交不等於排程已觸發，實際狀態須看 Actions 的 `schedule` 執行紀錄，不能以 `workflow_dispatch` 手動成功代替。
 
 仍可到 Actions → Collect Twitch live data → Run workflow 手動執行。同一時間只允許一個收集／發布工作，不取消正在執行的工作；沒有 push 或 workflow_run 收集觸發器。Test standalone collector 的 push CI 只跑離線測試，不查 API、不發布資料。
@@ -102,6 +106,11 @@ Helix 的直播語言不等於主播所在地。目前提供 `language_streamers
 |---|---|
 | `data/twitch_live.json` | 最新 schema v2 候選、驗證狀態與收集範圍 |
 | `data/twitch_history/YYYY-MM-DD.json` | 以台灣日期分檔、以 UTC 小時為索引的人數歷史 |
+| `data/twitch_collection_status.json` | 與 latest/history 同 commit 發布的小型成功紀錄，供外部監控及防重複檢查 |
+
+新版 workflow 輸出 `collection_schedule`：`target_slot` 為要求收集的 UTC 小時，另保存 `trigger_source`、GitHub `run_id` 與 `run_attempt`。歷史小時與 `observed_slot` 採**實際開始收集時間**；`generated_at`／receipt 的 `completed_at` 是完成時間，每個遊戲仍保留自己的分頁量測起訖。跨小時完成不代表下一小時的觀察，延遲也不會偽裝成過去的量測。既有未帶此 metadata 的舊歷史保持原樣，不自動改寫日期或倒填缺口。
+
+成功紀錄的 `collection_complete` 代表基礎分類量測完整且已提交前端儲存庫，不代表每個分類的追隨者查詢都完整，也不代表 GitHub Pages 已完成部署。低優先分類 `filtered_audience` 仍有缺值時，監控不會因此無限重跑；Pages 部署有獨立的 Actions 紀錄。
 
 `candidate_games` 包含所有達標且未被排除的候選；`top_games` 只含已確認全新的候選；`pending_verification` 是依發售線索與觀眾數排序的待查 ID；`excluded_games` 記錄預先排除的分類。排除項目不再量測，所以不能解讀為也達到 7,000 人。
 
@@ -125,9 +134,9 @@ Workflow artifact 的 `retention-days: 2` 僅是尚待發布結果的短期備�
 | `TWITCH_CLIENT_SECRET` | 取得 Twitch app access token |
 | `FRONTEND_REPO_TOKEN` | 寫入 `danielet087/game-trend-radar`；fine-grained token 僅選前端 Repo，Contents: Read and write |
 
-本版沒有新增必填 Secrets，不需要 Steam 或 YouTube 憑證，也不讀取 Steam 清單。IGDB 無法使用時仍可收集 Twitch 指標。程式不附帶任何 Secret 值；內建 `GITHUB_TOKEN` 不能取代跨 Repo 的 `FRONTEND_REPO_TOKEN`。
+Python 收集工作沿用上述三個 Secrets。Cloudflare Worker 額外需要其自身的 `GITHUB_ACTIONS_TOKEN` Secret，只選 Twitch 後端 Repo，Actions: Read and write；不可把此值放入程式或公開變數。Twitch 憑證與前端寫入 Token 留在 GitHub。IGDB 無法使用時仍可收集 Twitch 指標；內建 `GITHUB_TOKEN` 不能取代跨 Repo 的 `FRONTEND_REPO_TOKEN`。
 
-缺少 Twitch 憑證時 workflow 明確跳過；缺少發布 Token 時只保存 2 天的 JSON artifact，前端不改動。
+缺少收集或發布憑證時 workflow 明確失敗，不宣稱已更新。收集成功後先保存 2 天的 JSON artifact；若發布失敗，最新資料與成功紀錄不前進，可據實辨識尚未完成。
 
 ## 本機使用
 

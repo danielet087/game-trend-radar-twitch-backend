@@ -1,4 +1,5 @@
 name: Collect Twitch live data
+run-name: "Collect Twitch | slot=${{ inputs.target_slot || 'automatic' }} | ${{ inputs.trigger_source || github.event_name }}"
 
 # Run at minute 17 of every hour (also :17 in Asia/Taipei, UTC+8).
 # GitHub may delay scheduled starts; saved data keeps actual measurement times.
@@ -7,6 +8,22 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      target_slot:
+        description: 'UTC hourly slot (Cloudflare supplies this; leave empty for current hour)'
+        required: false
+        type: string
+      trigger_source:
+        description: 'Collection trigger source'
+        required: false
+        type: choice
+        options: [manual, cloudflare]
+        default: manual
+      force:
+        description: 'Manually collect again even if this hour is already published'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -28,13 +45,15 @@ jobs:
         env:
           TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
         run: |
-          if [ -n "$TWITCH_CLIENT_ID" ] && [ -n "$TWITCH_CLIENT_SECRET" ]; then
+          if [ -n "$TWITCH_CLIENT_ID" ] && [ -n "$TWITCH_CLIENT_SECRET" ] && [ -n "$FRONTEND_REPO_TOKEN" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo '::notice::Missing Twitch credentials; collection skipped.'
-            echo '### Twitch: 尚未設定 Secrets，本次未收集、未發布。' >> "$GITHUB_STEP_SUMMARY"
+            echo '::error::Missing collection or publication credentials.'
+            echo '### Twitch: 缺少收集或發布 Secrets，本次未收集、未發布。' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
       - uses: actions/setup-python@v5
         if: steps.credentials.outputs.configured == 'true'
@@ -47,8 +66,18 @@ jobs:
       - name: Run offline tests
         if: steps.credentials.outputs.configured == 'true'
         run: python -m pytest -q
-      - name: Restore daily follower counts
+      # Workflow concurrency is already held here. Recheck the newest published
+      # receipt after queued work, not just at external dispatch time.
+      - name: Recheck hourly publication
+        id: guard
         if: steps.credentials.outputs.configured == 'true'
+        env:
+          TARGET_SLOT: ${{ inputs.target_slot }}
+          TRIGGER_SOURCE: ${{ inputs.trigger_source || 'manual' }}
+          FORCE_COLLECTION: ${{ inputs.force || false }}
+        run: python -m scripts.collection_guard
+      - name: Restore daily follower counts
+        if: steps.guard.outputs.should_collect == 'true'
         continue-on-error: true
         uses: actions/cache/restore@v4
         with:
@@ -57,25 +86,27 @@ jobs:
           restore-keys: |
             twitch-followers-v1-
       - name: Collect Twitch
-        if: steps.credentials.outputs.configured == 'true'
+        if: steps.guard.outputs.should_collect == 'true'
         env:
           TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          TARGET_SLOT: ${{ steps.guard.outputs.target_slot }}
+          TRIGGER_SOURCE: ${{ steps.guard.outputs.trigger_source }}
         # One 25-minute collection deadline, leaving time inside the 30-minute
         # job for setup, cache save and publication. No separate follower cap.
-        run: python -m scripts.update_twitch --min-viewers 7000 --max-collection-seconds 1500 --output output/twitch_live.json
+        run: python -m scripts.update_twitch --min-viewers 7000 --max-collection-seconds 1500 --target-slot "$TARGET_SLOT" --trigger-source "$TRIGGER_SOURCE" --output output/twitch_live.json
       - name: Save follower lookup progress
-        if: always() && steps.credentials.outputs.configured == 'true' && hashFiles('.cache/twitch_followers.json') != ''
+        if: always() && steps.guard.outputs.should_collect == 'true' && hashFiles('.cache/twitch_followers.json') != ''
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: .cache/twitch_followers.json
           key: twitch-followers-v1-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Validate JSON
-        if: steps.credentials.outputs.configured == 'true'
+        if: steps.guard.outputs.should_collect == 'true'
         run: python -m json.tool output/twitch_live.json > /dev/null
       - name: Preserve collected JSON
-        if: steps.credentials.outputs.configured == 'true'
+        if: steps.guard.outputs.should_collect == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: twitch-live-json
@@ -84,15 +115,10 @@ jobs:
           # Short-lived recovery artifact only. Published daily history is not pruned.
           retention-days: 2
       - name: Publish to frontend
-        if: steps.credentials.outputs.configured == 'true'
+        if: steps.guard.outputs.should_collect == 'true'
         env:
           FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
         run: |
-          if [ -z "$FRONTEND_REPO_TOKEN" ]; then
-            echo '::notice::FRONTEND_REPO_TOKEN is not configured; JSON is available in the artifact only.'
-            echo '### Twitch: 已收集，未發布；請設定 FRONTEND_REPO_TOKEN。' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           bash scripts/publish_frontend.sh output/twitch_live.json
           echo '### Twitch: 已發布最新候選與每小時歷史紀錄。' >> "$GITHUB_STEP_SUMMARY"
       - name: Report failure

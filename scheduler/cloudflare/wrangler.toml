@@ -1,0 +1,20 @@
+name = "game-trend-radar-twitch-watchdog"
+main = "src/worker.mjs"
+compatibility_date = "2026-09-29"
+workers_dev = false
+preview_urls = false
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+GITHUB_OWNER = "danielet087"
+GITHUB_REPO = "game-trend-radar-twitch-backend"
+GITHUB_WORKFLOW_ID = "369223512"
+GITHUB_BRANCH = "main"
+FRONTEND_REPO = "game-trend-radar"
+
+# GITHUB_ACTIONS_TOKEN is a Cloudflare Secret, never a variable in this file.
+[observability]
+enabled = true
+head_sampling_rate = 1

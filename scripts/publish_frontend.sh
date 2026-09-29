@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Merge only Twitch latest/history against the latest frontend branch.
+# Merge Twitch latest/history and the publication receipt in one commit.
 set -euo pipefail
 source_file="$(realpath "${1:-output/twitch_live.json}")"
 test -s "$source_file"
@@ -21,6 +21,9 @@ for attempt in 1 2 3 4 5; do
   mkdir -p "$work_dir/frontend/data"
   history_path="$(cd "$script_dir/.." && python -m scripts.store_twitch_snapshot "$source_file" "$work_dir/frontend")"
   git -C "$work_dir/frontend" add -- data/twitch_live.json "$history_path"
+  if [[ -f "$work_dir/frontend/data/twitch_collection_status.json" ]]; then
+    git -C "$work_dir/frontend" add -- data/twitch_collection_status.json
+  fi
   if git -C "$work_dir/frontend" diff --cached --quiet; then
     echo 'twitch data is already up to date.'
     exit 0
