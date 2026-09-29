@@ -9,14 +9,16 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import math
 from pathlib import Path
 from statistics import median
 import time
-from typing import Any
+from typing import Any, Callable
 
 import requests
+from urllib3.util import Timeout
 
-from collectors.twitch_live import TwitchClient
+from collectors.twitch_live import CollectionDeadlineExceeded, TwitchClient
 from collectors.twitch_audience import CACHE_PATH, FollowerResolver, attach_filtered_audience
 from collectors.twitch_newness import (
     RELEASE_DATES_PATH, attach_experiments, load_release_dates, parse_timestamp, timestamp,
@@ -67,14 +69,23 @@ def verification_for(game_id: str, observations: dict, now: datetime) -> dict:
 
 
 class PageReader:
-    def __init__(self, client: TwitchClient, max_calls: int):
+    def __init__(self, client: TwitchClient, max_calls: int, *, deadline: float | None = None,
+                 monotonic: Callable[[], float] = time.monotonic):
         self.client, self.max_calls, self.calls = client, max_calls, 0
+        self.deadline, self.monotonic = deadline, monotonic
 
     def get(self, endpoint: str, params: dict) -> tuple[list[dict], str | None]:
+        if self.deadline is not None and self.monotonic() >= self.deadline:
+            raise IncompleteCollection("collection_deadline_exhausted during census; nothing will be published")
         if self.calls >= self.max_calls:
             raise IncompleteCollection("Helix call budget exhausted; nothing will be published")
         self.calls += 1
-        payload = self.client.get(endpoint, params=params)
+        try:
+            payload = self.client.get(endpoint, params=params)
+        except CollectionDeadlineExceeded:
+            raise IncompleteCollection("collection_deadline_exhausted during census; nothing will be published") from None
+        if self.deadline is not None and self.monotonic() >= self.deadline:
+            raise IncompleteCollection("collection_deadline_exhausted during census; nothing will be published")
         if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
             raise IncompleteCollection(f"Malformed Helix {endpoint} response")
         rows = payload["data"]
@@ -133,7 +144,8 @@ def category_metrics(reader: PageReader, game_id: str, max_pages: int = 150, *, 
     return result
 
 
-def release_hints(client: TwitchClient, games: list[dict], now: datetime) -> tuple[dict, str]:
+def release_hints(client: TwitchClient, games: list[dict], now: datetime, *, deadline: float | None = None,
+                  monotonic: Callable[[], float] = time.monotonic) -> tuple[dict, str]:
     ids = sorted({str(row.get("igdb_id")) for row in games if str(row.get("igdb_id") or "").isdigit()})
     if not ids:
         return {}, "no_igdb_ids"
@@ -142,15 +154,22 @@ def release_hints(client: TwitchClient, games: list[dict], now: datetime) -> tup
     for offset in range(0, len(ids), 100):
         query = "fields id,name,first_release_date; where id = (" + ",".join(ids[offset:offset + 100]) + "); limit 100;"
         try:
+            if deadline is not None and monotonic() >= deadline:
+                raise CollectionDeadlineExceeded("collection_deadline_exhausted")
             client._wait()
+            remaining = deadline - monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise CollectionDeadlineExceeded("collection_deadline_exhausted")
             try:
                 response = client.session.post(
                     IGDB_URL, data=query,
                     headers={"Client-ID": client.client_id, "Authorization": f"Bearer {client.access_token}"},
-                    timeout=client.timeout_seconds,
+                    timeout=(Timeout(total=remaining, connect=min(client.timeout_seconds, remaining),
+                                     read=min(client.timeout_seconds, remaining))
+                             if remaining is not None else client.timeout_seconds),
                 )
             finally:
-                client._last_request_at = time.monotonic()
+                client._last_request_at = monotonic()
             response.raise_for_status()
             rows = response.json()
             if not isinstance(rows, list):
@@ -167,6 +186,9 @@ def release_hints(client: TwitchClient, games: list[dict], now: datetime) -> tup
                     "first_release_date": timestamp(date) if date else None,
                     "release_band": band, "confirms_twitch_new_badge": False,
                 }
+        except CollectionDeadlineExceeded:
+            LOGGER.warning("IGDB hints stopped at collection deadline; remaining metadata stays unknown")
+            return hints, "collection_deadline_exhausted"
         except (requests.RequestException, ValueError, KeyError, OverflowError, OSError) as exc:
             # Never print response bodies/headers or turn metadata failures into exclusions.
             status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -182,15 +204,23 @@ def collect_candidates(
     release_dates_path: str | Path = RELEASE_DATES_PATH,
     client: TwitchClient | None = None, now: datetime | None = None, category_page_size: int = 100,
     include_filtered_audience: bool = False, followers_cache_path: str | Path = CACHE_PATH,
-    followers_max_calls: int = 1000, followers_max_seconds: float = 300,
+    followers_max_calls: int | None = None, followers_max_seconds: float | None = None,
+    max_collection_seconds: float = 1500,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
+    collection_started = monotonic()
+    if not math.isfinite(max_collection_seconds) or max_collection_seconds <= 0:
+        raise ValueError("Collection time budget must be positive and finite")
+    deadline = collection_started + max_collection_seconds
     if min(min_viewers, max_category_pages, max_stream_pages, max_api_calls) < 1 or not 1 <= category_page_size <= 100:
         raise ValueError("Threshold and limits must be positive; page size must be 1..100")
     clock = now or datetime.now(timezone.utc)
     observations = load_verifications(registry_path)
     release_dates = load_release_dates(release_dates_path)
     client = client or TwitchClient(client_id, client_secret, request_interval=0.3)
-    reader = PageReader(client, max_api_calls)
+    if isinstance(client, TwitchClient):
+        client.collection_deadline, client.monotonic = deadline, monotonic
+    reader = PageReader(client, max_api_calls, deadline=deadline, monotonic=monotonic)
     candidates_by_id, excluded_by_id = {}, {}
     channels_by_game: dict[str, list[dict]] = {}
     seen_ids, seen_cursors = set(), set()
@@ -270,7 +300,8 @@ def collect_candidates(
     candidates, excluded = list(candidates_by_id.values()), list(excluded_by_id.values())
     metadata_games = candidates + [r for r in excluded if r["reason"] == "observed_not_new"]
     hints_clock = now or datetime.now(timezone.utc)
-    hints, hints_status = release_hints(client, metadata_games, hints_clock) if include_release_hints else ({}, "disabled")
+    hints, hints_status = (release_hints(client, metadata_games, hints_clock, deadline=deadline, monotonic=monotonic)
+                           if include_release_hints else ({}, "disabled"))
     for row in candidates:
         hint = hints.get(str(row["igdb_id"]))
         if hint:
@@ -284,7 +315,8 @@ def collect_candidates(
     follower_coverage = None
     if include_filtered_audience:
         resolver = FollowerResolver(client, followers_cache_path, max_calls=followers_max_calls,
-                                    max_seconds=followers_max_seconds, utcnow=(lambda: now) if now else None)
+                                    max_seconds=followers_max_seconds, collection_deadline=deadline,
+                                    monotonic=monotonic, utcnow=(lambda: now) if now else None)
         follower_coverage = attach_filtered_audience(candidates, channels_by_game, resolver)
         finished = now or datetime.now(timezone.utc)
     return {
@@ -292,6 +324,9 @@ def collect_candidates(
         "source": "Twitch Helix API", "min_viewers": min_viewers,
         "coverage": {
             "collection_complete": True, "stop_reason": stop_reason,
+            "max_collection_seconds": max_collection_seconds,
+            "collection_elapsed_seconds": round(monotonic() - collection_started, 3),
+            "filtered_audience_complete": (follower_coverage["partial_categories"] == 0 if follower_coverage else None),
             "category_pages": page_index + 1, "categories_seen": len(seen_ids),
             "categories_measured": len(measured_ids), "category_measurements": measured_count,
             "duplicate_category_remeasurements": measured_count - len(measured_ids),

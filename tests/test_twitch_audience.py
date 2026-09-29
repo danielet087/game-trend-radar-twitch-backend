@@ -210,9 +210,88 @@ def test_collection_keeps_raw_metrics_no_channel_leak_and_only_queries_final_can
         assert row["streamer_count"] == sum(audience[key] for key in ["eligible_streamer_count", "excluded_low_viewer_count", "excluded_low_follower_count", "unknown_follower_count"])
 
 
-def test_cli_enables_filter_and_exposes_separate_budgets():
+def test_cli_enables_filter_and_only_defaults_to_collection_deadline():
     from scripts.update_twitch import build_parser
     args = build_parser().parse_args([])
     assert args.no_filtered_audience is False
-    assert args.followers_max_calls == 1000 and args.followers_max_seconds == 300
+    assert args.followers_max_calls is None and args.followers_max_seconds is None
+    assert args.max_collection_seconds == 1500
     assert args.followers_cache == ".cache/twitch_followers.json"
+
+
+def test_default_finishes_more_than_1000_channels_and_300_seconds(tmp_path):
+    clock = [0.0]
+    lookup, client = resolver(tmp_path, [2000] * 1205, monotonic=lambda: clock[0])
+    original_get = client.get
+
+    def slow_get(*args, **kwargs):
+        clock[0] += 1
+        return original_get(*args, **kwargs)
+
+    client.get = slow_get
+    metrics = filtered_metrics([stream(1, user, 10 + user) for user in range(1, 1206)], lookup)
+    assert clock[0] == 1205 and lookup.calls == 1205
+    assert metrics["status"] == "complete" and metrics["median_viewer_count"] == 613
+    assert metrics["unknown_follower_count"] == 0 and lookup.stop_reason is None
+    # Checkpoints persist progress before final save, even during a single large category.
+    assert lookup.checkpoints_saved == 24
+    assert len(json.loads((tmp_path / "followers.json").read_text())["followers"]) == 1200
+
+
+def test_shared_deadline_passes_only_remaining_time_then_reuses_cache_next_run(tmp_path):
+    clock = [0.0]
+    channels = [stream(1, 1, 9000), stream(1, 2, 100)]
+
+    def run(network):
+        base = FakeClient([("games/top", page([game(1)])), ("streams", page(channels))])
+        original_get = base.get
+
+        def census_get(*args, **kwargs):
+            clock[0] += 3
+            return original_get(*args, **kwargs)
+
+        base.get = census_get
+        original_lookup = network.get
+
+        def lookup(*args, **kwargs):
+            assert kwargs["timeout"].total == 2  # Not a fresh 8-second follower budget.
+            clock[0] += 2
+            return original_lookup(*args, **kwargs)
+
+        network.get = lookup
+        for key in ("session", "access_token", "client_id", "timeout_seconds", "request_interval", "_last_request_at"):
+            setattr(base, key, getattr(network, key))
+        return collect_candidates(client_id="fixture", client_secret="fixture", client=base, now=NOW,
+                                  registry_path=registry(tmp_path), include_release_hints=False,
+                                  include_filtered_audience=True, followers_cache_path=tmp_path / "followers.json",
+                                  max_collection_seconds=8, monotonic=lambda: clock[0])
+
+    first_network = FollowerClient([2000])
+    first = run(first_network)
+    first_metrics = first["candidate_games"][0]["filtered_audience"]
+    assert first["coverage"]["filtered_audience"]["stop_reason"] == "collection_deadline_exhausted"
+    assert first["coverage"]["collection_elapsed_seconds"] == 8
+    assert first["coverage"]["filtered_audience_complete"] is False
+    assert first_metrics["median_viewer_count"] is None and first_metrics["unknown_follower_count"] == 1
+    assert len(first_network.requests) == 1
+
+    second_network = FollowerClient([2500])
+    second = run(second_network)
+    assert len(second_network.requests) == 1
+    assert second_network.requests[0][1]["params"]["broadcaster_id"] == "2"
+    assert second["coverage"]["filtered_audience_complete"] is True
+    assert second["candidate_games"][0]["filtered_audience"]["median_viewer_count"] == 4550
+    assert second["coverage"]["filtered_audience"]["follower_cache_hits"] == 1
+    assert first_metrics["median_viewer_count"] is None  # Historical measurement stays honest.
+
+
+def test_deadline_stops_before_pacing_sleep_but_cache_is_still_usable(tmp_path):
+    clock = [9.8]
+    save_cache(tmp_path, {"2": record(2000)})
+    sleeps = []
+    lookup, client = resolver(tmp_path, [], collection_deadline=10,
+                              monotonic=lambda: clock[0], sleep=sleeps.append)
+    client.request_interval, client._last_request_at = 0.3, 9.8
+    assert lookup.resolve("1") is None and lookup.resolve("2") == 2000
+    assert lookup.stop_reason == "collection_deadline_exhausted"
+    assert sleeps == [] and client.requests == []

@@ -17,6 +17,7 @@ import time
 from typing import Callable
 
 import requests
+from urllib3.util import Timeout
 
 from collectors.twitch_live import TWITCH_API_BASE, TwitchClient
 from collectors.twitch_newness import parse_timestamp, timestamp
@@ -45,17 +46,25 @@ class FollowerResolver:
     """Resolve only public follower totals; share successes/failures across games."""
 
     def __init__(self, client: TwitchClient, cache_path: str | Path = CACHE_PATH, *,
-                 max_calls: int = 1000, max_seconds: float = 300,
+                 max_calls: int | None = None, max_seconds: float | None = None,
+                 collection_deadline: float | None = None,
                  utcnow: Callable[[], datetime] | None = None,
-                 monotonic: Callable[[], float] = time.monotonic):
-        if type(max_calls) is not int or max_calls < 0 or not math.isfinite(max_seconds) or max_seconds <= 0:
-            raise ValueError("Follower budget requires non-negative calls and positive finite seconds")
+                 monotonic: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep):
+        if max_calls is not None and (type(max_calls) is not int or max_calls < 0):
+            raise ValueError("Optional follower call budget must be a non-negative integer")
+        if max_seconds is not None and (not math.isfinite(max_seconds) or max_seconds <= 0):
+            raise ValueError("Optional follower time budget must be positive and finite")
+        if collection_deadline is not None and not math.isfinite(collection_deadline):
+            raise ValueError("Collection deadline must be finite")
         self.client, self.cache_path = client, Path(cache_path)
         self.max_calls, self.max_seconds = max_calls, max_seconds
+        self.collection_deadline = collection_deadline
         self.utcnow = utcnow or (lambda: datetime.now(timezone.utc))
-        self.monotonic = monotonic
+        self.monotonic, self.sleep = monotonic, sleep
         self.started = monotonic()
         self.calls = self.cache_hits = self.failures = self.consecutive_failures = 0
+        self.successes = self.checkpoints_saved = 0
         self.stop_reason: str | None = None
         self.results: dict[str, int | None] = {}
         self.cache: dict[str, dict] = {}
@@ -74,6 +83,18 @@ class FollowerResolver:
         except (OSError, ValueError, TypeError):
             LOGGER.warning("Follower cache unavailable or invalid; refresh within the lookup budget")
 
+    def remaining(self) -> tuple[float, str]:
+        """The original collection deadline is shared; enrichment never resets it."""
+        limits = []
+        if self.collection_deadline is not None:
+            limits.append((self.collection_deadline, "collection_deadline_exhausted"))
+        if self.max_seconds is not None:
+            limits.append((self.started + self.max_seconds, "time_budget_exhausted"))
+        if not limits:
+            return math.inf, ""
+        deadline, reason = min(limits)
+        return deadline - self.monotonic(), reason
+
     def resolve(self, user_id: str) -> int | None:
         if user_id in self.results and self.results[user_id] is None:
             return None
@@ -89,12 +110,12 @@ class FollowerResolver:
         self.results[user_id] = None
         if self.stop_reason:
             return None
-        if self.calls >= self.max_calls:
+        if self.max_calls is not None and self.calls >= self.max_calls:
             self.stop_reason = "call_budget_exhausted"
             return None
-        remaining = self.max_seconds - (self.monotonic() - self.started)
+        remaining, deadline_reason = self.remaining()
         if remaining <= 0:
-            self.stop_reason = "time_budget_exhausted"
+            self.stop_reason = deadline_reason
             return None
         # Collection already authenticated this same app. Never request a user
         # token, follower identities, subscriptions, or private web endpoints.
@@ -105,13 +126,13 @@ class FollowerResolver:
         # by minutes or preventing the complete base census from being published.
         wait = max(0.0, self.client.request_interval - (self.monotonic() - self.client._last_request_at))
         if wait >= remaining:
-            self.stop_reason = "time_budget_exhausted"
+            self.stop_reason = deadline_reason
             return None
         if wait:
-            time.sleep(wait)
-        remaining = self.max_seconds - (self.monotonic() - self.started)
+            self.sleep(wait)
+        remaining, deadline_reason = self.remaining()
         if remaining <= 0:
-            self.stop_reason = "time_budget_exhausted"
+            self.stop_reason = deadline_reason
             return None
         self.calls += 1
         status = None
@@ -120,7 +141,9 @@ class FollowerResolver:
                 f"{TWITCH_API_BASE}/channels/followers",
                 params={"broadcaster_id": user_id},
                 headers={"Client-Id": self.client.client_id, "Authorization": f"Bearer {self.client.access_token}"},
-                timeout=min(self.client.timeout_seconds, 8.0, remaining),
+                timeout=(Timeout(total=remaining, connect=min(self.client.timeout_seconds, 8.0, remaining),
+                                 read=min(self.client.timeout_seconds, 8.0, remaining))
+                         if math.isfinite(remaining) else min(self.client.timeout_seconds, 8.0)),
             )
             status = response.status_code
             response.raise_for_status()
@@ -131,12 +154,17 @@ class FollowerResolver:
             self.cache[user_id] = {"total": total, "observed_at": timestamp(self.utcnow())}
             self.results[user_id] = total
             self.consecutive_failures = 0
+            self.successes += 1
+            if self.successes % 50 == 0:
+                self.checkpoints_saved += int(self.save())
             return total
         except (requests.RequestException, ValueError, TypeError):
             # Do not print URLs, response bodies, headers, credentials, or exceptions.
             self.failures += 1
             self.consecutive_failures += 1
-            if status == 429:
+            if self.remaining()[0] <= 0:
+                self.stop_reason = self.remaining()[1]
+            elif status == 429:
                 self.stop_reason = "rate_limited"
             elif status in {401, 403}:
                 self.stop_reason = "authorization_unavailable"
@@ -206,8 +234,13 @@ def attach_filtered_audience(candidates: list[dict], channels_by_game: dict[str,
         return rank, -row["viewer_count"], row["game_id"]
 
     try:
-        for row in sorted(candidates, key=priority):
+        for index, row in enumerate(sorted(candidates, key=priority), 1):
             row["filtered_audience"] = filtered_metrics(channels_by_game[row["game_id"]], resolver)
+            metrics = row["filtered_audience"]
+            LOGGER.info("Filtered audience %d/%d, game %s: %s, %d qualified channels, %d unknown; %d lookups / %d cache hits",
+                        index, len(candidates), row["game_id"], metrics["status"],
+                        metrics["eligible_streamer_count"], metrics["unknown_follower_count"],
+                        resolver.calls, resolver.cache_hits)
     finally:
         saved = resolver.save()
     complete = sum(row["filtered_audience"]["status"] == "complete" for row in candidates)
@@ -217,6 +250,8 @@ def attach_filtered_audience(candidates: list[dict], channels_by_game: dict[str,
         "follower_lookup_failures": resolver.failures,
         "unknown_unique_broadcasters": sum(total is None for total in resolver.results.values()),
         "max_lookup_calls": resolver.max_calls, "max_lookup_seconds": resolver.max_seconds,
+        "lookup_elapsed_seconds": round(resolver.monotonic() - resolver.started, 3),
+        "cache_checkpoints_saved": resolver.checkpoints_saved,
         "stop_reason": resolver.stop_reason or ("completed_with_unknown_followers" if resolver.failures else "all_required_followers_resolved"),
         "cache_saved": saved,
     }

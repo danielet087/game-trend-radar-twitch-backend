@@ -1,11 +1,11 @@
 name: Collect Twitch live data
 
-# Run at minute 07 of every hour (also :07 in Asia/Taipei, UTC+8).
+# Run at minute 17 of every hour (also :17 in Asia/Taipei, UTC+8).
 # GitHub may delay scheduled starts; saved data keeps actual measurement times.
 # CI tests run separately and do not call the live API.
 on:
   schedule:
-    - cron: '7 * * * *'
+    - cron: '17 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -61,7 +61,9 @@ jobs:
         env:
           TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
-        run: python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.json
+        # One 25-minute collection deadline, leaving time inside the 30-minute
+        # job for setup, cache save and publication. No separate follower cap.
+        run: python -m scripts.update_twitch --min-viewers 7000 --max-collection-seconds 1500 --output output/twitch_live.json
       - name: Save follower lookup progress
         if: always() && steps.credentials.outputs.configured == 'true' && hashFiles('.cache/twitch_followers.json') != ''
         continue-on-error: true

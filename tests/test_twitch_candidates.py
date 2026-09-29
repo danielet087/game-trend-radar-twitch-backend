@@ -3,6 +3,7 @@ import json
 
 import pytest
 import requests
+from collectors.twitch_live import CollectionDeadlineExceeded, TwitchClient
 
 from collectors.twitch_candidates import (
     IncompleteCollection, PageReader, REGISTRY_PATH, category_metrics, collect_candidates,
@@ -259,3 +260,73 @@ def test_duplicate_only_page_cannot_establish_boundary(tmp_path):
     result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
                                 registry_path=registry(tmp_path), include_release_hints=False)
     assert [row["game_id"] for row in result["candidate_games"]] == ["2"]
+
+
+def test_census_deadline_fails_instead_of_publishing_partial_base_data(tmp_path):
+    clock = [0.0]
+    client = FakeClient([("games/top", page([game(1)])), ("streams", page([stream(1, 1, 9000)]))])
+    original_get = client.get
+
+    def slow_get(*args, **kwargs):
+        clock[0] += 2
+        return original_get(*args, **kwargs)
+
+    client.get = slow_get
+    with pytest.raises(IncompleteCollection, match="collection_deadline_exhausted"):
+        collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
+                           registry_path=registry(tmp_path), include_release_hints=False,
+                           max_collection_seconds=1, monotonic=lambda: clock[0])
+    assert [endpoint for endpoint, _ in client.calls] == ["games/top"]
+
+
+@pytest.mark.parametrize("phase", ["oauth", "rate_limit", "server_error", "request_timeout", "already_expired"])
+def test_http_auth_requests_and_retries_share_collection_deadline(phase):
+    clock = [0.0]
+    client = TwitchClient("test", "secret-must-not-leak", request_interval=0)
+    client.monotonic = lambda: clock[0]
+    client.collection_deadline = 0.5
+    waits = []
+    client.sleep = waits.append
+
+    class Session:
+        status_code = 200
+        headers = {"Ratelimit-Reset": "0"}
+        calls = []
+
+        def post(self, url, **kwargs):
+            self.calls.append("oauth")
+            assert kwargs["timeout"].total == 0.5
+            clock[0] = 0.6
+            return self
+
+        def get(self, url, **kwargs):
+            self.calls.append("helix")
+            assert kwargs["timeout"].total == 0.5
+            if phase == "request_timeout":
+                clock[0] = 0.5
+                raise requests.Timeout()
+            self.status_code = 429 if phase == "rate_limit" else 503
+            return self
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"access_token": "test", "data": []}
+
+    session = Session()
+    client.session = session
+    if phase != "oauth":
+        client.access_token = "test"
+    if phase == "already_expired":
+        clock[0] = 0.5
+    with pytest.raises(CollectionDeadlineExceeded, match="collection_deadline_exhausted"):
+        client.get("games/top")
+    assert session.calls == ([] if phase == "already_expired" else ["oauth" if phase == "oauth" else "helix"])
+    assert waits == []  # No retry sleep or second HTTP attempt can extend the deadline.
+
+
+def test_release_hints_make_no_request_after_collection_deadline():
+    client = FakeClient([])
+    hints, status = release_hints(client, [{"igdb_id": "123"}], NOW, deadline=10, monotonic=lambda: 10)
+    assert hints == {} and status == "collection_deadline_exhausted"

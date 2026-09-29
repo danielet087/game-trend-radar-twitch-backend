@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import requests
+from urllib3.util import Timeout
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,6 +31,10 @@ class TwitchGame:
     igdb_id: str | None
 
 
+class CollectionDeadlineExceeded(RuntimeError):
+    """No new request or retry may start after the collection soft deadline."""
+
+
 class TwitchClient:
     def __init__(
         self,
@@ -46,6 +51,24 @@ class TwitchClient:
         self.session = requests.Session()
         self.access_token: str | None = None
         self._last_request_at = 0.0
+        self.collection_deadline: float | None = None
+        self.monotonic = time.monotonic
+        self.sleep = time.sleep
+
+    def _request_timeout(self):
+        if self.collection_deadline is None:
+            return self.timeout_seconds
+        remaining = self.collection_deadline - self.monotonic()
+        if remaining <= 0:
+            raise CollectionDeadlineExceeded("collection_deadline_exhausted")
+        return Timeout(total=remaining, connect=min(self.timeout_seconds, remaining),
+                       read=min(self.timeout_seconds, remaining))
+
+    def _sleep_with_deadline(self, delay: float) -> None:
+        if self.collection_deadline is not None and self.monotonic() + delay >= self.collection_deadline:
+            raise CollectionDeadlineExceeded("collection_deadline_exhausted")
+        if delay > 0:
+            self.sleep(delay)
 
     def authenticate(self) -> None:
         # Send credentials in the request body, never in a URL or an exception.
@@ -57,7 +80,7 @@ class TwitchClient:
                     "client_secret": self.client_secret,
                     "grant_type": "client_credentials",
                 },
-                timeout=self.timeout_seconds,
+                timeout=self._request_timeout(),
             )
             response.raise_for_status()
         except requests.RequestException as exc:
@@ -73,10 +96,10 @@ class TwitchClient:
     def _wait(self) -> None:
         if self.request_interval <= 0:
             return
-        now = time.monotonic()
+        now = self.monotonic()
         delay = self.request_interval - (now - self._last_request_at)
         if delay > 0:
-            time.sleep(delay)
+            self._sleep_with_deadline(delay)
 
     def get(
         self,
@@ -101,9 +124,9 @@ class TwitchClient:
                     url,
                     params=params,
                     headers=headers,
-                    timeout=self.timeout_seconds,
+                    timeout=self._request_timeout(),
                 )
-                self._last_request_at = time.monotonic()
+                self._last_request_at = self.monotonic()
 
                 if response.status_code == 401 and attempt == 0:
                     self.access_token = None
@@ -118,13 +141,13 @@ class TwitchClient:
                         delay = max(1.0, int(reset_at) - time.time() + 1.0)
                     delay = min(delay, 120.0)
                     LOGGER.warning("Twitch rate limit reached; sleeping %.1fs", delay)
-                    time.sleep(delay)
+                    self._sleep_with_deadline(delay)
                     continue
 
                 if response.status_code in {500, 502, 503, 504}:
                     delay = min(2 ** attempt, 30)
                     last_error = f"HTTP {response.status_code}"
-                    time.sleep(delay)
+                    self._sleep_with_deadline(delay)
                     continue
 
                 response.raise_for_status()
@@ -135,7 +158,7 @@ class TwitchClient:
                 last_error = f"HTTP {status}" if status is not None else type(exc).__name__
                 if attempt == 4:
                     break
-                time.sleep(min(2 ** attempt, 30))
+                self._sleep_with_deadline(min(2 ** attempt, 30))
 
         raise RuntimeError(f"Twitch API request failed: {last_error}")
 

@@ -4,7 +4,7 @@
 
 ## 執行狀態
 
-**已設定每小時 07 分自動收集**（台灣時間，例如 22:07、23:07、00:07）。GitHub Actions 的 cron 為 `7 * * * *`；UTC 與台灣都落在每小時第 07 分，不需另外平移小時。排程可能延遲，因此資料保存實際收集與量測時間，不將延遲結果標成準點觀測。新版首輪實際結果仍須以 Actions 的 `Collect Twitch live data` 及前端 JSON 更新為準；程式測試成功不等於完成收集。
+**已設定每小時 17 分自動收集**（台灣時間，例如 23:17、00:17、01:17）。GitHub Actions 的 cron 為 `17 * * * *`；UTC 與台灣都落在每小時第 17 分，不需另外平移小時。排程可能延遲，因此資料保存實際收集與量測時間，不將延遲結果標成準點觀測。2026-09-29 重新調整 cron；設定已提交不等於排程已觸發，實際狀態須看 Actions 的 `schedule` 執行紀錄，不能以 `workflow_dispatch` 手動成功代替。
 
 仍可到 Actions → Collect Twitch live data → Run workflow 手動執行。同一時間只允許一個收集／發布工作，不取消正在執行的工作；沒有 push 或 workflow_run 收集觸發器。Test standalone collector 的 push CI 只跑離線測試，不查 API、不發布資料。
 
@@ -84,7 +84,11 @@ python -m scripts.import_twitch_release_dates saved-response.json \
 
 成功查得的追隨總數保存到 runner 的 `.cache/twitch_followers.json`，以實際查詢時間判斷 24 小時有效期。快取只含頻道 ID、`total` 及 `observed_at`，只保存有效成功結果；未知與失敗不持久化、超過 24 小時或未來時間的資料不使用。GitHub Actions 還原前次快取，完成後保存新快取。此快取不是前端公開資料，也不保存原始直播名單或追隨者身分。
 
-補充追隨數另有每輪 1,000 次／300 秒預算，時間在每次請求前檢查，進行中的單次 HTTP 請求仍受 timeout 約束。不會為耗盡預算阻止基礎快照發布；首次或快取過期可能顯示「待補齊」，後續排程使用已完成的快取繼續補查。`coverage.filtered_audience` 紀錄快取命中、API 查詢、失敗、完整／未完整分類與停止原因。`helix_calls_excluding_retries` 包含此次補充查詢；原分類掃描次數另列於 `census_helix_calls_excluding_retries`。
+**預設不再限制追隨數每輪 1,000 次／300 秒。** 收集器先完成官方 NEW，再處理日期實驗有新作線索的候選，最後查其他達標候選；在同一輪持續補查，正常情況查完整再發布。仍沿用請求間隔及 24 小時快取，不以無節制併發增加 API 負擔。
+
+整輪收集共用 `--max-collection-seconds 1500`（25 分鐘）的軟期限，從開始收集即計時，包含分類／直播掃描、輔助日期和追隨數查詢；不是追隨查詢另加 25 分鐘。GitHub 工作仍有 30 分鐘硬逾時，差額留給安裝、保存快取及發布。若基礎分類尚未查完整就到期限，保留前端上一版、不發布不完整的總數；若基礎資料完整但追隨查詢遇到期限、限流或錯誤，發布時會明確保存 `partial`／`null`，不宣稱完整中位數。可選的 `--followers-max-calls`／`--followers-max-seconds` 僅供手動診斷，正式排程不設定。
+
+`coverage.filtered_audience` 紀錄快取命中、API 查詢、失敗、完整／未完整分類與停止原因。`helix_calls_excluding_retries` 包含此次補充查詢；原分類掃描次數另列於 `census_helix_calls_excluding_retries`。未完成的查詢不會在工作結束後於背景繼續；下次執行會使用有效快取收集當時的直播資料，不倒填舊時段中位數。
 
 分類探索會在目錄結束，或**整頁已量測分類都低於門檻，且至少量測一個本次新出現分類**時停止。跨頁重複分類重新量測；如果仍達標就繼續，若整頁都是已排除或重複分類也繼續。候選依 ID 去重，重複量測採較新的結果。這是利用 API 排名縮小探索範圍的策略，不保證掃描期間任何時刻曾超過門檻的遊戲都被捕捉；JSON 會記錄 `stop_reason`、`all_categories_enumerated` 與重複量測次數。
 
@@ -141,12 +145,13 @@ python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.j
 | `--max-category-pages` | `5` | 分類頁上限，每頁最多 100 類 |
 | `--max-stream-pages` | `150` | 每類直播分頁上限，每頁最多 100 台 |
 | `--max-api-calls` | `1200` | 基礎分類／直播掃描的 Helix 邏輯呼叫上限，不含 OAuth、重試、IGDB 與獨立追隨查詢 |
+| `--max-collection-seconds` | `1500` | 整輪收集共用軟期限，預留工作保存／發布時間 |
 | `--verification-registry` | 專案的驗證 JSON | 直接觀察紀錄檔 |
 | `--release-dates` | `data/twitch_release_dates.json` | 有來源與擷取時間的 Twitch 原始發售日期匯入檔 |
 | `--no-release-hints` | 不啟用 | 加上此旗標即可略過 IGDB |
 | `--followers-cache` | `.cache/twitch_followers.json` | 追隨總數 24 小時快取，只保存在 runner／Actions cache |
-| `--followers-max-calls` | `1000` | 每輪追隨總數查詢預算，可設 0 只使用有效快取 |
-| `--followers-max-seconds` | `300` | 補充階段時間預算，每次請求前檢查 |
+| `--followers-max-calls` | 不限制 | 可選診斷限制；設 0 只使用有效快取，正式排程不設定 |
+| `--followers-max-seconds` | 不另設限制 | 可選診斷限制；平常只受整輪收集期限約束 |
 | `--no-filtered-audience` | 不啟用 | CLI 預設計算篩選指標；加上此旗標可略過，原指標不變 |
 
 本機收集不需要發布 Token。只有執行 `bash scripts/publish_frontend.sh output/twitch_live.json` 才需要 `FRONTEND_REPO_TOKEN`。

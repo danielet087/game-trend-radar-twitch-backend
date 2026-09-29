@@ -17,12 +17,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-category-pages", type=int, default=5)
     parser.add_argument("--max-stream-pages", type=int, default=150)
     parser.add_argument("--max-api-calls", type=int, default=1200)
+    parser.add_argument("--max-collection-seconds", type=float, default=1500,
+                        help="Shared census + metadata + follower soft deadline; reserves time for publishing")
     parser.add_argument("--verification-registry", default=str(REGISTRY_PATH))
     parser.add_argument("--release-dates", default=str(RELEASE_DATES_PATH), help="Dated Twitch originalReleaseDate export for the 14-day trial")
     parser.add_argument("--no-release-hints", action="store_true")
     parser.add_argument("--followers-cache", default=str(CACHE_PATH), help="Runner-local daily follower-total cache")
-    parser.add_argument("--followers-max-calls", type=int, default=1000, help="Separate follower enrichment request budget")
-    parser.add_argument("--followers-max-seconds", type=float, default=300, help="Follower enrichment time budget, checked before each request")
+    parser.add_argument("--followers-max-calls", type=int, default=None,
+                        help="Optional diagnostic follower request cap; default: no separate cap")
+    parser.add_argument("--followers-max-seconds", type=float, default=None,
+                        help="Optional diagnostic follower time cap; default: collection deadline only")
     parser.add_argument("--no-filtered-audience", action="store_true", help="Disable follower-qualified statistics (CLI default: enabled)")
     return parser
 
@@ -46,6 +50,7 @@ def main() -> None:
         max_category_pages=args.max_category_pages,
         max_stream_pages=args.max_stream_pages,
         max_api_calls=args.max_api_calls,
+        max_collection_seconds=args.max_collection_seconds,
         registry_path=args.verification_registry,
         release_dates_path=args.release_dates,
         include_release_hints=not args.no_release_hints,
@@ -58,7 +63,7 @@ def main() -> None:
     experiment = payload["newness_experiment"]
     twitch_trial, igdb_trial = (experiment[key] for key in ("twitch_original_release_date", "igdb_first_release_date"))
     print(
-        f"Twitch collection complete: "
+        f"Twitch category census complete: "
         f"{len(payload['candidate_games'])} qualifying categories, "
         f"{len(payload['top_games'])} verified NEW, "
         f"{len(payload['pending_verification'])} pending -> {path}"
@@ -71,6 +76,10 @@ def main() -> None:
         print(f"Filtered audience: {audience['complete_categories']} complete / {audience['partial_categories']} partial categories; "
               f"{audience['follower_lookup_calls']} follower lookups, {audience['follower_cache_hits']} cache hits; "
               f"{audience['stop_reason']}. Only followers > 1,000 and viewers >= 10 qualify.")
+        print(f"Collection elapsed {payload['coverage']['collection_elapsed_seconds']:.1f}s / "
+              f"{args.max_collection_seconds:g}s overall deadline. "
+              f"Follower request cap: {args.followers_max_calls if args.followers_max_calls is not None else 'none'}; "
+              f"separate follower time cap: {args.followers_max_seconds if args.followers_max_seconds is not None else 'none'}.")
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as summary:
@@ -83,6 +92,7 @@ def main() -> None:
                 f"- 暫時排除：{len(payload['excluded_games'])} 類\n"
                 f"- Helix 呼叫（不含重試）：{payload['coverage']['helix_calls_excluding_retries']}\n"
                 f"- 掃描停止原因：{payload['coverage']['stop_reason']}\n\n"
+                f"- 本輪收集耗時：{payload['coverage']['collection_elapsed_seconds']:.1f} 秒；整體期限：{args.max_collection_seconds:g} 秒\n\n"
                 "全體總觀眾、開台數及原始中位數保留所有直播台；篩選中位數使用下方獨立條件。\n"
                 "新標記仍以附時間的 Twitch 直接觀察為準。\n\n"
                 "### 14 天日期實驗（不等於官方 NEW）\n\n"
@@ -100,6 +110,7 @@ def main() -> None:
                     f"- 完整分類：{audience['complete_categories']}；待補齊分類：{audience['partial_categories']}\n"
                     f"- 追隨數 API 查詢：{audience['follower_lookup_calls']}；24 小時內快取命中：{audience['follower_cache_hits']}\n"
                     f"- 追隨數查詢失敗：{audience['follower_lookup_failures']}；停止原因：{audience['stop_reason']}\n"
+                    f"- 追隨數額外查詢上限：{args.followers_max_calls if args.followers_max_calls is not None else '無'}；額外時間上限：{args.followers_max_seconds if args.followers_max_seconds is not None else '無'}\n"
                     f"- 快取保存：{'成功' if audience['cache_saved'] else '失敗'}\n\n"
                     "任何 ≥10 觀眾的頻道追隨數未知時，該分類中位數暫不提供，避免使用偏差的部分樣本。\n"
                     "合格樣本為零時中位數也是空值；未知與空樣本皆不填 0。\n"
