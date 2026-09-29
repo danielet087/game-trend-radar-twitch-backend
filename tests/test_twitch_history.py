@@ -1,4 +1,5 @@
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -71,3 +72,37 @@ def test_history_preserves_experiment_without_promoting_pending_to_official_new(
     row = json.loads((tmp_path/path).read_text())["hours"]["2026-09-28T16:00:00Z"]["games"][0]
     assert row["release_experiment"] == experiment
     assert row["verification"]["status"] == "pending"
+
+
+def test_scheduled_history_accumulates_beyond_thirty_days_without_pruning(tmp_path):
+    # Publishing a new day must preserve old files, including a month boundary.
+    start = datetime(2026, 9, 29, 15, 7, tzinfo=timezone.utc)
+    saved = {}
+    for day in range(35):
+        for hour in (0, 1):
+            at = (start + timedelta(days=day, hours=hour)).isoformat().replace("+00:00", "Z")
+            payload = snapshot(at)
+            payload["candidate_games"][0]["median_viewer_count"] = 0 if hour == 0 else 0.5
+            relative = store_snapshot(payload, tmp_path)
+            saved[at] = relative
+    expected_days = set(saved.values())
+    assert len(list((tmp_path/"data/twitch_history").glob("*.json"))) == len(expected_days)
+    for at, relative in saved.items():
+        archive = json.loads((tmp_path/relative).read_text())
+        key = at[:13] + ":00:00Z"
+        entry = archive["hours"][key]
+        assert entry["generated_at"] == at
+        assert entry["games"][0]["median_viewer_count"] == (0 if "T15:" in at else 0.5)
+        assert entry["games"][0]["verification"]["status"] == "pending"
+    assert json.loads((tmp_path/"data/twitch_live.json").read_text())["generated_at"] == max(saved)
+
+
+def test_game_leaving_candidates_keeps_earlier_history_without_zero_fill(tmp_path):
+    path = store_snapshot(snapshot("2026-09-28T16:07:00Z"), tmp_path)
+    empty = snapshot("2026-09-28T18:07:00Z")
+    empty["candidate_games"] = []
+    store_snapshot(empty, tmp_path)
+    hours = json.loads((tmp_path/path).read_text())["hours"]
+    assert hours["2026-09-28T16:00:00Z"]["games"][0]["viewer_count"] == 10000
+    assert "2026-09-28T17:00:00Z" not in hours
+    assert hours["2026-09-28T18:00:00Z"]["games"] == []

@@ -4,7 +4,9 @@
 
 ## 執行狀態
 
-**收集目前維持手動。** 到 Actions → Collect Twitch live data → Run workflow 執行。先確認新版候選收集的實際結果與用量，再啟用每小時排程。目前沒有 cron、push 或 workflow_run 收集觸發器；Test standalone collector 的 push CI 只跑離線測試，不查 API、不發布資料。
+**已設定每小時 07 分自動收集**（台灣時間，例如 22:07、23:07、00:07）。GitHub Actions 的 cron 為 `7 * * * *`；UTC 與台灣都落在每小時第 07 分，不需另外平移小時。排程可能延遲，因此資料保存實際收集與量測時間，不將延遲結果標成準點觀測。新版首輪實際結果仍須以 Actions 的 `Collect Twitch live data` 及前端 JSON 更新為準；程式測試成功不等於完成收集。
+
+仍可到 Actions → Collect Twitch live data → Run workflow 手動執行。同一時間只允許一個收集／發布工作，不取消正在執行的工作；沒有 push 或 workflow_run 收集觸發器。Test standalone collector 的 push CI 只跑離線測試，不查 API、不發布資料。
 
 舊版收集器已成功連線及發布；這不代表新版候選流程已通過實際 API 測試。2026-09-29 01:08（台灣）啟動的新版收集在 Helix 呼叫預算耗盡後中止，沒有發布。當時第 2～4 頁各有 99 個新量測分類且皆低於門檻，但跨頁重複分類使停止條件一直不成立。本版改為重新量測重複分類，再判斷門檻，不增加 API 呼叫預算。每次執行會在 Actions Summary 顯示候選數、待驗證數、日期實驗及 Helix 呼叫次數。
 
@@ -30,7 +32,7 @@
 
 採用 [Glance 的實作條件](https://github.com/glanceapp/glance/blob/372466c6d75318670dc66e4e452179350fc50c97/internal/glance/widget-twitch-top-games.go)：`評估時間 − 發售時間 < 14 × 24 小時`。滿 14 天不符合；未來日期也符合，但另標記 `release_phase: upcoming`，不顯示成已上市。
 
-本版隨每次手動收集產生 `newness_experiment`，並在每款遊戲的 `release_experiment` 中保留兩條獨立結果：
+本版隨每次排程或手動收集產生 `newness_experiment`，並在每款遊戲的 `release_experiment` 中保留兩條獨立結果：
 
 | 來源 | 日期 | 可用狀況 |
 |---|---|---|
@@ -52,7 +54,7 @@ python -m scripts.import_twitch_release_dates saved-response.json \
   --observed-at 2026-09-29T12:00:00Z
 ```
 
-`--observed-at` 必須改成實際擷取時間，不能用匯入時間。第三方每筆已有 `scrapedAt` 時可以省略。來源網址只記公開網址，不含查詢字串；匯入器只保存日期與來源欄位。重複 ID 只接受較新紀錄，同一時間有衝突日期則拒絕。匯入資料提交到 Repo 後，下次手動 workflow 即會使用。
+`--observed-at` 必須改成實際擷取時間，不能用匯入時間。第三方每筆已有 `scrapedAt` 時可以省略。來源網址只記公開網址，不含查詢字串；匯入器只保存日期與來源欄位。重複 ID 只接受較新紀錄，同一時間有衝突日期則拒絕。匯入資料提交到 Repo 後，下次排程或手動 workflow 即會使用。
 
 **實際資料取得仍未完成：** 本版能自動做 IGDB 試算；沒有 Twitch 日期匯出時，Twitch 日期實驗的可判定數會是 0。不能把離線測試通過、IGDB 試算完成或先前 6 筆標記觀察，說成已完成官方 NEW 自動確認。
 
@@ -84,6 +86,10 @@ Helix 的直播語言不等於主播所在地。目前提供 `language_streamers
 `candidate_games` 包含所有達標且未被排除的候選；`top_games` 只含已確認全新的候選；`pending_verification` 是依發售線索與觀眾數排序的待查 ID；`excluded_games` 記錄預先排除的分類。排除項目不再量測，所以不能解讀為也達到 7,000 人。
 
 歷史保存候選的三項指標、量測時間及**當次**驗證狀態，不會事後把過去的 `pending` 改寫成已確認。同一小時重跑只接受較新的結果，跨小時保留；較晚完成的舊資料不會倒退最新檔。未出現在某小時的遊戲不會被填成 0 人；它可能低於門檻、被排除或未在當次探索範圍。
+
+**歷史持續累積，不設 24 小時或 30 天刪除期限。** 每個台灣日期各有一份歷史檔，更新當天時不刪除前一天、前一月或更早的檔案。每個小時保留最新一次成功快照，包括當時的候選、官方驗證狀態與兩種日期推算；新進榜及之後不再入列的遊戲，其已保存紀錄均保留。收集失敗的時段保持缺測，不複製上一筆也不補零。前端實驗頁目前查看最近 24 小時，並不代表只保存 24 小時。
+
+Workflow artifact 的 `retention-days: 2` 僅是尚待發布結果的短期備份；已提交到前端 Git Repository 的每日歷史不受該期限影響。現有舊版取樣不會補寫為 schema v2 的完整量測，中位數與新作判斷從新版成功收集後開始累積。
 
 發布前取得最新前端，只提交上述 Twitch 路徑；遇到其他後端同時發布時，重新合併，最多重試 5 次，不使用 force push。未成功發布的結果不冒充前端已更新。
 

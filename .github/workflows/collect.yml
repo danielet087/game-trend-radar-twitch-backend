@@ -1,8 +1,11 @@
 name: Collect Twitch live data
 
-# First validate the new threshold collector manually before enabling its hourly schedule.
+# Run at minute 07 of every hour (also :07 in Asia/Taipei, UTC+8).
+# GitHub may delay scheduled starts; saved data keeps actual measurement times.
 # CI tests run separately and do not call the live API.
 on:
+  schedule:
+    - cron: '7 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -60,6 +63,7 @@ jobs:
           name: twitch-live-json
           path: output/twitch_live.json
           if-no-files-found: error
+          # Short-lived recovery artifact only. Published daily history is not pruned.
           retention-days: 2
       - name: Publish to frontend
         if: steps.credentials.outputs.configured == 'true'
