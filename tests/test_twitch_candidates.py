@@ -347,6 +347,29 @@ def stub_hints(monkeypatch, dates, *, status="ok", checked_at=None):
     return batches
 
 
+def test_asmr_music_skip_metadata_streams_and_followers_without_hiding_later_games(tmp_path, monkeypatch):
+    client = FakeClient([
+        ("games/top", page([game("509659", "101"), game("26936", "102")], "games")),
+        ("games/top", page([game(3, "103")])),
+        ("streams", page([stream(3, 30, 8000)])),
+    ])
+    batches = stub_hints(monkeypatch, {"103": timestamp(NOW)})
+    looked_up = []
+    monkeypatch.setattr(FollowerResolver, "resolve", lambda self, user_id: looked_up.append(user_id) or 2001)
+    result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
+                                registry_path=registry(tmp_path), include_filtered_audience=True,
+                                followers_cache_path=tmp_path / "followers.json")
+    assert batches == [["103"]]
+    assert [params["game_id"] for endpoint, params in client.calls if endpoint == "streams"] == ["3"]
+    assert looked_up == ["30"]
+    assert [row["game_id"] for row in result["candidate_games"]] == ["3"]
+    assert {row["game_id"] for row in result["excluded_games"]} == {"509659", "26936"}
+    for row in result["excluded_games"]:
+        assert row["reason"] == "non_game_category"
+        assert row["metrics_collected"] is False and row["viewer_threshold_met"] is None
+        assert "viewer_count" not in row and "filtered_audience" not in row
+
+
 def test_igdb_miss_skips_all_stream_pages_and_follower_lookups(tmp_path, monkeypatch):
     client = FakeClient([
         ("games/top", page([game(1, "101"), game(2, "102"), game(3, "103"), game(4, "104")])),

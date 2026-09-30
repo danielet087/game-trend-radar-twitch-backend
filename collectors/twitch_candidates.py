@@ -28,7 +28,10 @@ from collectors.twitch_newness import (
 LOGGER = logging.getLogger(__name__)
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "data/twitch_category_verification.json"
 IGDB_URL = "https://api.igdb.com/v4/games"
-NON_GAME_IDS = {"509658": "Just Chatting", "509672": "IRL", "509663": "Special Events"}
+NON_GAME_IDS = {
+    "509658": "Just Chatting", "509672": "IRL", "509663": "Special Events",
+    "509659": "ASMR", "26936": "Music",
+}
 
 
 class IncompleteCollection(RuntimeError):
