@@ -4,11 +4,11 @@
 
 ## 執行狀態
 
-2026-09-30 新增 [Cloudflare 漏跑監控](scheduler/cloudflare/README.md)：每 5 分鐘檢查本小時是否已發布完整基礎量測，缺資料且沒有執行中的工作時才觸發既有 Python workflow。Cloudflare 程式與設定提交到 GitHub **不代表外部排程已啟用**，需先依部署說明設定 Worker 與 `GITHUB_ACTIONS_TOKEN`，再以 Cloudflare 日誌、Actions 的 `cloudflare` 執行名稱與發布 receipt 三者驗證。
+2026-09-30 新增 [Cloudflare 每小時排程](scheduler/cloudflare/README.md)：每小時第 05 分檢查本小時是否已發布完整基礎量測，缺資料且沒有執行中的工作時才觸發既有 Python workflow。Cloudflare 每小時只檢查一次，不在同一小時每 5 分鐘重試；GitHub 原生第 17 分排程保留為備援。Cloudflare 程式與設定提交到 GitHub **不代表外部排程已啟用**，需先依部署說明設定 Worker 與 `GITHUB_ACTIONS_TOKEN`，再以 Cloudflare 日誌、Actions 的 `cloudflare` 執行名稱與發布 receipt 三者驗證。
 
 所有入口共用 workflow concurrency；工作開始後會解析前端最新 git HEAD，讀取該不可變版本的成功紀錄，再判斷是否需要收集。同一小時已有成功發布時直接略過；舊時段延遲排隊的外部請求略過，不回填歷史直播數。手動 Run workflow 預設也防重複，需要重新取樣時才勾選 `force`。原生 GitHub cron 留作備援。
 
-**已設定每小時 17 分自動收集**（台灣時間，例如 23:17、00:17、01:17）。GitHub Actions 的 cron 為 `17 * * * *`；UTC 與台灣都落在每小時第 17 分，不需另外平移小時。排程可能延遲，因此資料保存實際收集與量測時間，不將延遲結果標成準點觀測。2026-09-29 重新調整 cron；設定已提交不等於排程已觸發，實際狀態須看 Actions 的 `schedule` 執行紀錄，不能以 `workflow_dispatch` 手動成功代替。
+**Cloudflare 設定於每小時 05 分觸發，GitHub Actions 於 17 分備援**（台灣時間，例如 11:05 與 11:17）。兩者的 cron 分別為 `5 * * * *` 與 `17 * * * *`；UTC 與台灣分鐘相同，不需另外平移小時。備援仍會檢查本小時回條，已發布就略過收集。排程可能延遲，因此資料保存實際收集與量測時間，不將延遲結果標成準點觀測。設定已提交不等於排程已觸發，實際狀態須看 Actions 的 `cloudflare` 名稱或 `schedule` 執行紀錄，不能以手動成功代替。
 
 仍可到 Actions → Collect Twitch live data → Run workflow 手動執行。同一時間只允許一個收集／發布工作，不取消正在執行的工作；沒有 push 或 workflow_run 收集觸發器。Test standalone collector 的 push CI 只跑離線測試，不查 API、不發布資料。
 
