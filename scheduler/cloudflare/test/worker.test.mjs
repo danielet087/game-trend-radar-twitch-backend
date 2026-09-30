@@ -40,6 +40,7 @@ function mockApi({ published = null, runs = [], active = {}, dispatchStatus = 20
   const fetchImpl = async (input, options = {}) => {
     const url = new URL(input);
     requests.push({ url, options });
+    assert.equal(options.redirect, "manual", "outbound requests must not follow redirects");
     if (responder) {
       const replacement = await responder(url, options);
       if (replacement) return replacement;
@@ -51,7 +52,6 @@ function mockApi({ published = null, runs = [], active = {}, dispatchStatus = 20
     }
     assert.equal(url.hostname, "api.github.com");
     assert.equal(options.headers.Authorization, "Bearer test-only-token");
-    assert.equal(options.redirect, "error");
     if (url.pathname.endsWith("/dispatches")) {
       assert.equal(options.method, "POST");
       return new Response(dispatchStatus === 204 ? null : "{}", { status: dispatchStatus });
@@ -202,6 +202,31 @@ test("receipt HTTP failure blocks dispatch", async () => {
   const api = mockApi({ responder: (url) => url.hostname === "raw.githubusercontent.com" ? new Response("failure", { status: 503 }) : undefined });
   await assert.rejects(check(api), /receipt_http_503/);
   assert.equal(api.posts().length, 0);
+});
+
+test("receipt redirects are rejected without querying GitHub or dispatching", async () => {
+  for (const status of [301, 302, 303, 307, 308]) {
+    const api = mockApi({ responder: (url) => url.hostname === "raw.githubusercontent.com"
+      ? new Response(null, { status, headers: { Location: "https://untrusted.invalid/receipt" } }) : undefined });
+    await assert.rejects(check(api), /receipt_redirect_rejected/);
+    assert.equal(api.requests.length, 1);
+    assert.equal(api.posts().length, 0);
+  }
+});
+
+test("GitHub redirects cannot forward the token or lead to dispatch", async () => {
+  const api = mockApi({ responder: (url) => url.hostname === "api.github.com"
+    ? new Response(null, { status: 302, headers: { Location: "https://untrusted.invalid/runs" } }) : undefined });
+  await assert.rejects(check(api), /github_runs_redirect_rejected/);
+  assert.equal(api.posts().length, 0);
+  assert.ok(api.requests.every(({ url }) => ["api.github.com", "raw.githubusercontent.com"].includes(url.hostname)));
+});
+
+test("dispatch redirects are not reported as a successful trigger", async () => {
+  const api = mockApi({ responder: (url) => url.pathname.endsWith("/dispatches")
+    ? new Response(null, { status: 307, headers: { Location: "https://untrusted.invalid/dispatches" } }) : undefined });
+  await assert.rejects(check(api), /github_dispatch_redirect_rejected/);
+  assert.equal(api.posts().length, 1);
 });
 
 test("null and malformed response shapes fail closed", async () => {

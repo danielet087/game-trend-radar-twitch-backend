@@ -98,6 +98,15 @@ node --test test/*.test.mjs
 
 測試涵蓋已發布、404 首次啟動、跨日 UTC 時段、舊觀測延後發布、五種執行中狀態、冷卻與上限、分頁、觸發回應、API 失敗、異常回條、巨大回應、秘密不送到公開網址，以及 HTTP 端點不執行工作。
 
+GitHub CI 另以 Miniflare／workerd 執行真實 Workers 請求相容性測試，所有外部請求都由本機 fixture 回應，不使用真實 token 或觸發 GitHub。測試工具獨立放在 `test/runtime`，不增加 Worker 執行時依賴，也不需要修改 Cloudflare 的 Build command。
+
+```sh
+npm ci --prefix test/runtime --no-audit --no-fund
+npm test --prefix test/runtime
+```
+
+對外請求使用 `redirect: "manual"`，明確拒絕所有 3xx 回應。不要改成 `redirect: "error"`：Node.js 接受這個值，但 workerd 會在發出請求前拒絕它，原本會因此記錄 `receipt_unavailable`。亦不可改成自動跟隨重新導向，避免將 GitHub token 送到其他位置。
+
 Worker 結構化日誌只包含結果代碼、時段與執行 ID，不輸出 token、請求標頭或 API 回應內容。常見結果：
 
 | `action` / `reason` | 說明 |
@@ -108,6 +117,7 @@ Worker 結構化日誌只包含結果代碼、時段與執行 ID，不輸出 tok
 | `wait` / `retry_cooldown` | 等候 10 分鐘重試間隔 |
 | `wait` / `hourly_attempt_limit` | 已看見 2 次嘗試，不再自動觸發 |
 | `dispatch` / `missing_published_collection` | GitHub 已接受觸發；尚未代表資料已更新 |
+| `blocked` / `receipt_redirect_rejected`、`github_runs_redirect_rejected` 或 `github_dispatch_redirect_rejected` | 來源回傳重新導向；沒有跟隨目標網址，也不視為觸發成功 |
 | `blocked` / `receipt_*` 或 `github_*` | 讀取失敗或內容不可信；此次沒有盲目補跑 |
 
 ## 免費額度與限制

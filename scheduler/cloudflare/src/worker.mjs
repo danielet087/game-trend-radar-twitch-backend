@@ -55,11 +55,16 @@ async function request(fetchImpl, url, options, label, allowMissing = false) {
   try {
     response = await fetchImpl(url, {
       ...options,
-      redirect: "error",
+      // workerd rejects redirect: "error" while Node's fetch accepts it.
+      // Inspect redirects ourselves so credentials can never follow a Location.
+      redirect: "manual",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch {
     throw new WatchdogError(`${label}_unavailable`);
+  }
+  if (response.status >= 300 && response.status < 400) {
+    throw new WatchdogError(`${label}_redirect_rejected`);
   }
   if (allowMissing && response.status === 404) return null;
   if (!response.ok) throw new WatchdogError(`${label}_http_${response.status}`);

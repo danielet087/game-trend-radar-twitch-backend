@@ -1,0 +1,14 @@
+{
+  "name": "twitch-watchdog-runtime-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test worker-runtime.test.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "5.20260926.1-alpha"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

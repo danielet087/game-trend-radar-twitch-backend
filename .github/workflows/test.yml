@@ -26,3 +26,7 @@ jobs:
         with:
           node-version: '22'
       - run: node --test scheduler/cloudflare/test/*.test.mjs
+      - name: Install Cloudflare runtime test tools
+        run: npm ci --prefix scheduler/cloudflare/test/runtime --no-audit --no-fund
+      - name: Test outbound requests in the Cloudflare runtime
+        run: npm test --prefix scheduler/cloudflare/test/runtime
