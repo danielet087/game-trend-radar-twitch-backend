@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Shared census + metadata + follower soft deadline; reserves time for publishing")
     parser.add_argument("--verification-registry", default=str(REGISTRY_PATH))
     parser.add_argument("--release-dates", default=str(RELEASE_DATES_PATH), help="Dated Twitch originalReleaseDate export for the 14-day trial")
-    parser.add_argument("--no-release-hints", action="store_true")
+    parser.add_argument("--no-release-hints", action="store_true", help="Disable IGDB metadata and its 30-day collection filter")
     parser.add_argument("--followers-cache", default=str(CACHE_PATH), help="Runner-local daily follower-total cache")
     parser.add_argument("--followers-max-calls", type=int, default=None,
                         help="Optional diagnostic follower request cap; default: no separate cap")
@@ -79,8 +79,10 @@ def main() -> None:
         f"{len(payload['top_games'])} verified NEW, "
         f"{len(payload['pending_verification'])} pending -> {path}"
     )
-    print(f"14-day trial: Twitch dates {twitch_trial['evaluated_candidates']} evaluated / "
-          f"{twitch_trial['unknown_candidates']} unknown; IGDB comparison {igdb_trial['evaluated_candidates']} evaluated. "
+    print(f"Twitch {twitch_trial['window_days']}-day trial: {twitch_trial['evaluated_candidates']} evaluated / "
+          f"{twitch_trial['unknown_candidates']} unknown; IGDB {igdb_trial['window_days']}-day filter: "
+          f"{igdb_trial['evaluated_candidates']} evaluated candidates / "
+          f"{payload['coverage']['excluded_by_igdb_date_count']} excluded before metrics. "
           "Date predictions are not confirmed Twitch NEW badges.")
     audience = payload["coverage"].get("filtered_audience")
     if audience:
@@ -101,17 +103,20 @@ def main() -> None:
                 f"- 已確認全新：{len(payload['top_games'])} 款\n"
                 f"- 待驗證：{len(payload['pending_verification'])} 款\n"
                 f"- 暫時排除：{len(payload['excluded_games'])} 類\n"
+                f"- IGDB 30 天未命中、略過直播／追隨查詢：{payload['coverage']['excluded_by_igdb_date_count']} 類（未量測門檻）\n"
                 f"- Helix 呼叫（不含重試）：{payload['coverage']['helix_calls_excluding_retries']}\n"
                 f"- 掃描停止原因：{payload['coverage']['stop_reason']}\n\n"
                 f"- 本輪收集耗時：{payload['coverage']['collection_elapsed_seconds']:.1f} 秒；整體期限：{args.max_collection_seconds:g} 秒\n\n"
                 "全體總觀眾、開台數及原始中位數保留所有直播台；篩選中位數使用下方獨立條件。\n"
                 "新標記仍以附時間的 Twitch 直接觀察為準。\n\n"
-                "### 14 天日期實驗（不等於官方 NEW）\n\n"
-                f"- Twitch 原始日期：{twitch_trial['evaluated_candidates']} 款可判定、{twitch_trial['unknown_candidates']} 款缺資料或已過期\n"
+                "### 日期實驗與收集篩選（不等於官方 NEW）\n\n"
+                f"- Twitch 原始日期・{twitch_trial['window_days']} 天：{twitch_trial['evaluated_candidates']} 款可判定、{twitch_trial['unknown_candidates']} 款缺資料或已過期\n"
                 f"- Twitch 日期推算 NEW：{len(twitch_trial['predicted_new_game_ids'])} 款，其中尚未發售 {len(twitch_trial['upcoming_game_ids'])} 款\n"
-                f"- IGDB 平行試算：{igdb_trial['evaluated_candidates']} 款可判定，推算 NEW {len(igdb_trial['predicted_new_game_ids'])} 款\n"
+                f"- IGDB 日期・{igdb_trial['window_days']} 天：{igdb_trial['evaluated_candidates']} 款候選可判定，推算 NEW {len(igdb_trial['predicted_new_game_ids'])} 款\n"
+                f"- IGDB 預先查詢：{payload['coverage']['igdb_categories_evaluated']} 類可判定、{payload['coverage']['igdb_categories_unknown']} 類未知\n"
                 f"- 與先前官方標記對照：{len(experiment['reference_checks'])} 筆來源／遊戲組合；詳見 JSON，回溯對照不代表官方規則驗證通過\n\n"
                 "Glance 的判斷為日期差 < 14 天，包含未來日期；滿 14 天即不符合。\n"
+                "IGDB 改為日期差 < 30 天，包含未來日期；滿 30 天即停止該遊戲本輪直播與追隨查詢，保留既有歷史。\n"
                 "缺少 Twitch 原始日期時保持未知；IGDB 結果分開顯示，不補成 Twitch 原始日期。\n"
             )
             if audience:

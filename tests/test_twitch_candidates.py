@@ -1,9 +1,11 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
 import requests
 from collectors.twitch_live import CollectionDeadlineExceeded, TwitchClient
+from collectors.twitch_newness import timestamp
+from collectors.twitch_audience import FollowerResolver
 
 from collectors.twitch_candidates import (
     IncompleteCollection, PageReader, REGISTRY_PATH, category_metrics, collect_candidates,
@@ -107,7 +109,7 @@ def test_complete_page_boundary_does_not_skip_a_later_qualifying_category(tmp_pa
     assert [row["game_id"] for row in result["candidate_games"]] == ["2"]
     assert result["pending_verification"] == ["2"]
     assert result["top_games"] == []
-    assert result["coverage"]["stop_reason"] == "whole_page_below_threshold"
+    assert result["coverage"]["stop_reason"] == "measured_eligible_page_below_threshold"
     assert result["coverage"]["all_categories_enumerated"] is False
     assert len(client.calls) == 6
 
@@ -227,7 +229,7 @@ def test_cross_page_duplicate_is_remeasured_and_does_not_disable_boundary(tmp_pa
     result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
                                 registry_path=registry(tmp_path), include_release_hints=False)
     assert [row["game_id"] for row in result["candidate_games"]] == ["1"]
-    assert result["coverage"]["stop_reason"] == "whole_page_below_threshold"
+    assert result["coverage"]["stop_reason"] == "measured_eligible_page_below_threshold"
     assert result["coverage"]["duplicate_category_remeasurements"] == 1
     assert len(client.calls) == 6
 
@@ -330,3 +332,137 @@ def test_release_hints_make_no_request_after_collection_deadline():
     client = FakeClient([])
     hints, status = release_hints(client, [{"igdb_id": "123"}], NOW, deadline=10, monotonic=lambda: 10)
     assert hints == {} and status == "collection_deadline_exhausted"
+
+
+def stub_hints(monkeypatch, dates, *, status="ok", checked_at=None):
+    batches = []
+    def hints(client, games, now, **kwargs):
+        batches.append([str(row["igdb_id"]) for row in games])
+        return {str(row["igdb_id"]): {
+            "source": "IGDB", "checked_at": checked_at or timestamp(now),
+            "first_release_date": dates[str(row["igdb_id"])],
+            "confirms_twitch_new_badge": False,
+        } for row in games if str(row["igdb_id"]) in dates}, status
+    monkeypatch.setattr("collectors.twitch_candidates.release_hints", hints)
+    return batches
+
+
+def test_igdb_miss_skips_all_stream_pages_and_follower_lookups(tmp_path, monkeypatch):
+    client = FakeClient([
+        ("games/top", page([game(1, "101"), game(2, "102"), game(3, "103"), game(4, "104")])),
+        ("streams", page([stream(3, 30, 8000)])),
+        ("streams", page([stream(4, 40, 9000)])),
+    ])
+    batches = stub_hints(monkeypatch, {
+        "101": timestamp(NOW - timedelta(days=100)),
+        "102": timestamp(NOW - timedelta(days=30)),
+        "103": timestamp(NOW - timedelta(days=30) + timedelta(seconds=1)),
+        "104": timestamp(NOW + timedelta(days=10)),
+    })
+    looked_up = []
+    monkeypatch.setattr(FollowerResolver, "resolve", lambda self, user_id: looked_up.append(user_id) or 2001)
+    result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
+                                registry_path=registry(tmp_path, {"1": observed("new")}),
+                                include_filtered_audience=True, followers_cache_path=tmp_path / "followers.json")
+    assert batches == [["101", "102", "103", "104"]]
+    assert [params["game_id"] for endpoint, params in client.calls if endpoint == "streams"] == ["3", "4"]
+    assert set(looked_up) == {"30", "40"}
+    assert {row["game_id"] for row in result["candidate_games"]} == {"3", "4"}
+    assert result["coverage"]["excluded_by_igdb_date_count"] == 2
+    assert result["coverage"]["igdb_categories_evaluated"] == 4
+    assert result["coverage"]["igdb_categories_unknown"] == 0
+    excluded = {row["game_id"]: row for row in result["excluded_games"]}
+    for row in excluded.values():
+        assert row["reason"] == "igdb_release_outside_window"
+        assert row["metrics_collected"] is False and row["viewer_threshold_met"] is None
+        assert row["exclusion_window_days"] == 30
+        assert row["release_experiment"]["igdb_first_release_date"]["predicted_new"] is False
+        assert row["release_experiment"]["igdb_first_release_date"]["window_days"] == 30
+        assert not {"viewer_count", "streamer_count", "median_viewer_count", "filtered_audience"} & row.keys()
+    assert excluded["1"]["verification"]["status"] == "new"  # Collection filter cannot overwrite official evidence.
+    assert result["newness_experiment"]["igdb_first_release_date"]["evaluated_excluded"] == 2
+
+
+@pytest.mark.parametrize("dates,status,checked_at", [
+    ({}, "unavailable_or_partial", None),
+    ({}, "ok", None),
+    ({"101": None}, "ok", None),
+    ({"101": "invalid-date"}, "ok", None),
+    ({"101": "2000-01-01T00:00:00Z"}, "ok", timestamp(NOW - timedelta(days=1))),
+    ({"101": "2000-01-01T00:00:00Z"}, "ok", timestamp(NOW + timedelta(seconds=1))),
+])
+def test_unknown_igdb_metadata_keeps_metrics_and_follower_collection(tmp_path, monkeypatch, dates, status, checked_at):
+    client = FakeClient([("games/top", page([game(1, "101")])), ("streams", page([stream(1, 10, 8000)]))])
+    stub_hints(monkeypatch, dates, status=status, checked_at=checked_at)
+    looked_up = []
+    monkeypatch.setattr(FollowerResolver, "resolve", lambda self, user_id: looked_up.append(user_id) or 2001)
+    result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
+                                registry_path=registry(tmp_path), include_filtered_audience=True,
+                                followers_cache_path=tmp_path / "followers.json")
+    assert looked_up == ["10"]
+    assert result["candidate_games"][0]["release_experiment"]["igdb_first_release_date"]["predicted_new"] is None
+    assert result["candidate_games"][0]["verification"]["status"] == "pending"
+    assert result["excluded_games"] == []
+    assert result["coverage"]["igdb_categories_unknown"] == 1
+
+
+def test_excluded_igdb_page_continues_and_later_same_page_hit_is_not_hidden(tmp_path, monkeypatch):
+    client = FakeClient([
+        ("games/top", page([game(1, "101")], "second")),
+        ("games/top", page([game(1, "101"), game(2, "102"), game(3, "103")], "third")),
+        ("streams", page([stream(2, 20, 1000)])),
+        ("streams", page([stream(3, 30, 8000)])),
+        ("games/top", page([game(4, "104")])),
+        ("streams", page([stream(4, 40, 9000)])),
+    ])
+    batches = stub_hints(monkeypatch, {
+        "101": timestamp(NOW - timedelta(days=30)),
+        **{key: timestamp(NOW - timedelta(days=20)) for key in ("102", "103", "104")},
+    })
+    result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
+                                registry_path=registry(tmp_path))
+    assert batches == [["101"], ["102", "103"], ["104"]]
+    assert {row["game_id"] for row in result["candidate_games"]} == {"3", "4"}
+    assert result["coverage"]["category_pages"] == 3
+    assert result["coverage"]["excluded_by_igdb_date_count"] == 1
+
+
+def test_mixed_skipped_and_low_page_reports_eligible_boundary_without_measuring_skips(tmp_path, monkeypatch):
+    client = FakeClient([
+        ("games/top", page([game(1, "101"), game(2, "102")], "more")),
+        ("streams", page([stream(2, 20, 1000)])),
+    ])
+    stub_hints(monkeypatch, {"101": timestamp(NOW - timedelta(days=30)), "102": timestamp(NOW)})
+    result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
+                                registry_path=registry(tmp_path))
+    assert result["coverage"]["stop_reason"] == "measured_eligible_page_below_threshold"
+    assert result["coverage"]["all_categories_enumerated"] is False
+    assert result["coverage"]["categories_seen"] == 2
+    assert result["coverage"]["categories_measured"] == result["coverage"]["below_threshold_count"] == 1
+    assert result["excluded_games"][0]["viewer_threshold_met"] is None
+
+
+def test_crossing_thirty_days_during_census_preserves_prefilter_evaluation(tmp_path, monkeypatch):
+    clock = [NOW]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+    monkeypatch.setattr("collectors.twitch_candidates.datetime", Clock)
+    client = FakeClient([("games/top", page([game(1, "101")])), ("streams", page([stream(1, 10, 8000)]))])
+    original_get = client.get
+    def advancing_get(endpoint, **kwargs):
+        if endpoint == "streams":
+            clock[0] += timedelta(seconds=2)
+        return original_get(endpoint, **kwargs)
+    client.get = advancing_get
+    stub_hints(monkeypatch, {"101": timestamp(NOW - timedelta(days=30) + timedelta(seconds=1))})
+    looked_up = []
+    monkeypatch.setattr(FollowerResolver, "resolve", lambda self, user_id: looked_up.append(user_id) or 2001)
+    result = collect_candidates(client_id="test", client_secret="test", client=client,
+                                registry_path=registry(tmp_path), include_filtered_audience=True,
+                                followers_cache_path=tmp_path / "followers.json")
+    prediction = result["candidate_games"][0]["release_experiment"]["igdb_first_release_date"]
+    assert prediction["predicted_new"] is True and prediction["evaluated_at"] == timestamp(NOW)
+    assert result["generated_at"] == timestamp(NOW + timedelta(seconds=2))
+    assert looked_up == ["10"]

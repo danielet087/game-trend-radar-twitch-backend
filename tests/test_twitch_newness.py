@@ -23,15 +23,34 @@ def test_glance_rule_boundary_offsets_and_future_are_explicit(release_at, predic
     assert result["predicted_new"] is prediction
     assert result["release_phase"] == phase
     assert result["confirms_twitch_new_badge"] is False
+    assert result["window_days"] == 14
 
 
+@pytest.mark.parametrize("release_at,prediction,phase", [
+    ("2026-08-30T12:00:01Z", True, "released_within_30_days"),
+    ("2026-08-30T12:00:00Z", False, "older_release"),
+    ("2026-08-30T20:00:00+08:00", False, "older_release"),
+    ("2026-09-15T12:00:00Z", True, "released_within_30_days"),
+    ("2026-09-29T12:00:00Z", True, "released_within_30_days"),
+    ("2027-09-29T12:00:00Z", True, "upcoming"),
+])
+def test_igdb_uses_exact_thirty_day_boundary_independently_of_twitch(release_at, prediction, phase):
+    result = evaluate_date(release_at, CAPTURED, NOW, source="igdb_first_release_date")
+    assert result["predicted_new"] is prediction
+    assert result["release_phase"] == phase
+    assert result["window_days"] == 30
+    assert result["rule"] == "igdb_release_age_lt_30_days_v1"
+    assert result["confirms_twitch_new_badge"] is False
+
+
+@pytest.mark.parametrize("source", ["twitch_original_release_date", "igdb_first_release_date"])
 @pytest.mark.parametrize("release_at,captured", [
     (None, CAPTURED), ("bad-date", CAPTURED), ("2026-09-28", CAPTURED),
     ("2026-09-28T00:00:00Z", "2026-09-28T12:00:00Z"),
     ("2026-09-28T00:00:00Z", "2026-09-29T12:00:01Z"),
 ])
-def test_missing_invalid_expired_or_future_metadata_is_unknown_not_false(release_at, captured):
-    result = evaluate_date(release_at, captured, NOW, source="twitch_original_release_date")
+def test_missing_invalid_expired_or_future_metadata_is_unknown_not_false(release_at, captured, source):
+    result = evaluate_date(release_at, captured, NOW, source=source)
     assert result["status"] == "unknown" and result["predicted_new"] is None
 
 
@@ -44,18 +63,22 @@ def test_igdb_never_fills_twitch_original_date_or_changes_official_status():
     assert candidates[0]["release_experiment"]["igdb_first_release_date"]["predicted_new"] is True
     assert report["twitch_original_release_date"]["predicted_new_game_ids"] == []
     assert report["igdb_first_release_date"]["predicted_new_game_ids"] == ["10"]
+    assert report["twitch_original_release_date"]["window_days"] == 14
+    assert report["igdb_first_release_date"]["window_days"] == 30
+    assert "window_days" not in report  # No one global window can describe both sources.
 
 
 def test_badge_comparison_uses_observation_time_and_reports_date_mismatch():
     candidates = [{"game_id": "10", "game_name": "Boundary", "igdb_id": "100",
                    "verification": {"status": "new", "observed_at": "2026-09-28T16:00:00Z"}}]
-    # Under 14 days when the badge was seen, but over 14 days now.
-    hints = {"100": {"checked_at": CAPTURED, "first_release_date": "2026-09-15T00:00:00Z"}}
+    # Under 30 days when the badge was seen, but over 30 days now.
+    hints = {"100": {"checked_at": CAPTURED, "first_release_date": "2026-08-30T00:00:00Z"}}
     report = attach_experiments(candidates, [], hints, {}, NOW)
     assert candidates[0]["release_experiment"]["igdb_first_release_date"]["predicted_new"] is False
     comparison = report["reference_checks"][0]
     assert comparison["agrees_with_reference"] is True
     assert comparison["comparison_kind"] == "retrospective"
+    assert comparison["window_days"] == 30
     assert candidates[0]["verification"]["status"] == "new"
     # A conflicting date is retained as disagreement, never used to remove NEW.
     hints["100"]["first_release_date"] = "2021-02-02T00:00:00Z"

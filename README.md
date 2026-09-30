@@ -17,13 +17,13 @@
 ## 收集與驗證流程
 
 1. 用 Helix `Get Top Games` 取得依觀眾數排列的分類。這個 API 沒有回傳總觀眾數，也沒有「全新」欄位。
-2. 先略過非遊戲分類，以及仍在有效期內、曾直接確認沒有「全新」標記的分類，減少重複查詢。
-3. 對剩餘分類逐一查詢 `Get Streams`，跟隨游標翻完直播分頁，以實況主 ID 去重，再計算總觀眾數與中位數。保留總觀眾數 **≥ 7,000** 的候選。
-4. 有有效「全新」觀察紀錄的候選列為 `new`；其他候選列為 `pending`。待驗證候選同樣保留人數與歷史，避免等驗證完成才開始記錄。
-5. 批次查詢候選及仍有有效官方觀察的排除分類之 IGDB 首次發售日期，用來排列驗證優先順序，並進行下述 14 天平行試算。官方已確認全新的遊戲也保留在試算中，才能看見日期規則與官方標記的分歧。
+2. 每頁先批次查詢 IGDB 首次發售日期。可判定且日期差 **≥ 30 × 24 小時**的遊戲，直接停止該遊戲本輪直播分頁與追隨數查詢。非遊戲分類，以及有效直接觀察為沒有「全新」標記的分類，也略過量測。
+3. IGDB 30 天推算命中，或日期仍未知的分類，逐一查詢 `Get Streams`，跟隨游標翻完直播分頁，以實況主 ID 去重，再計算總觀眾數與中位數。保留總觀眾數 **≥ 7,000** 的候選。
+4. 每頁所有符合日期收集條件的分類都會檢查；若該頁至少有一款首次量測，且量測結果全低於門檻，依目錄排名停止往後翻頁。僅包含排除項或跨頁重複項的頁面繼續掃描。此排名式停止條件不能證明所有被略過分類低於門檻，也不能視為同時刻的完整全球普查。
+5. 有有效「全新」觀察紀錄的候選列為 `new`；其他候選列為 `pending`。IGDB 篩選不改寫官方觀察狀態；日期與官方觀察有分歧的排除項仍保留雙方證據及對照。
 6. 對已達 7,000 人的候選計算篩選指標。先排除當次觀眾 0～9 人的台，再查 ≥10 人頻道的公開追隨總數；恰好 1,000 名追隨者不符合。優先處理官方 NEW、接著日期實驗有新作線索的候選，最後補其他候選。同一實況主跨遊戲共用快取與本輪查詢結果。
 
-**IGDB 發售日期不能證明 Twitch 的「全新」標記。** 例如本次目錄觀察中，Valheim 也有該標記。因此不以「上市超過 30 天」自動排除。IGDB 失敗、沒有 IGDB ID、或不在先前目錄樣本內，都維持待驗證。
+**IGDB 發售日期不能證明 Twitch 的「全新」標記。** 30 天規則僅控制本網站的資料收集範圍。IGDB 失敗、沒有 IGDB ID、日期缺少／失效都維持未知並繼續收集；不把未知當作未命中。每小時仍重新掃描分類與日期，遊戲資料修正後可以重新入列。既有歷史不刪除，不填補停止收集後的空白時段。
 
 ### 直接觀察紀錄
 
@@ -33,20 +33,22 @@
 
 **目前沒有自動刷新這份標記紀錄的來源。** Twitch 網頁分頁實驗遇到 integrity check，未完成 7,000 人門檻的目錄掃描；本收集器不依賴該網頁爬取。後續可直接核對待驗證候選，在確認卡片標記後更新觀察紀錄；不能把未載入、查不到或缺少資料填成 `not_new`。`new` 與 `not_new` 都必須有直接觀察來源，不接受永久標記。
 
-### 14 天日期實驗
+### Twitch 14 天實驗與 IGDB 30 天收集篩選
 
 採用 [Glance 的實作條件](https://github.com/glanceapp/glance/blob/372466c6d75318670dc66e4e452179350fc50c97/internal/glance/widget-twitch-top-games.go)：`評估時間 − 發售時間 < 14 × 24 小時`。滿 14 天不符合；未來日期也符合，但另標記 `release_phase: upcoming`，不顯示成已上市。
+
+Twitch 原始日期實驗保留上述 14 天條件。IGDB 另改為 `評估時間 − 首次發售時間 < 30 × 24 小時`；恰好滿 30 天即未命中，未來日期仍命中。每筆推算及每種來源的報告均保存 `window_days` 與 `rule`，舊的 14 天歷史保持原樣。
 
 本版隨每次排程或手動收集產生 `newness_experiment`，並在每款遊戲的 `release_experiment` 中保留兩條獨立結果：
 
 | 來源 | 日期 | 可用狀況 |
 |---|---|---|
 | `twitch_original_release_date` | Twitch 的 `originalReleaseDate` | 目前缺資料；需有來源、擷取時間的既有回應或第三方資料集匯出 |
-| `igdb_first_release_date` | 官方 IGDB API 的 `first_release_date` | 沿用現有 Twitch 憑證批次查詢，單獨列為平行試算，絕不補成 Twitch 原始日期 |
+| `igdb_first_release_date` | 官方 IGDB API 的 `first_release_date` | 沿用現有 Twitch 憑證批次查詢，獨立的 30 天推算及收集篩選，不補成 Twitch 原始日期 |
 
-`predicted_new` 為 `true` / `false` / `null`；缺資料、日期不合法、擷取時間在未來，或資料擷取超過 24 小時，都回傳未知 `null`。所有推算都標記 `confirms_twitch_new_badge: false`，不改動 `verification` 或 `top_games`，也不拿推算的 `false` 排除遊戲。實驗結果與人數一併保存到每小時歷史。
+`predicted_new` 為 `true` / `false` / `null`；缺資料、日期不合法、擷取時間在未來，或資料擷取超過 24 小時，都回傳未知 `null`。所有推算都標記 `confirms_twitch_new_badge: false`，不改寫 `verification`。IGDB 的有效 `false` 會將分類列入 `excluded_games`，原因為 `igdb_release_outside_window`，附上日期證據、30 天窗口與完整推算。因為已略過直播查詢，其 `metrics_collected` 為 `false`、`viewer_threshold_met` 為 `null`，不能稱它已達 7,000 人，也不將未量測人數填 0。`top_games` 僅包含仍在收集範圍且達觀眾門檻、官方觀察為 `new` 的候選。
 
-`newness_experiment` 列出每種來源可判定／未知的候選數、推算 NEW 的遊戲 ID、尚未上市 ID，以及與有效官方觀察的 `reference_checks`。對照使用**官方標記當時**的時間計算；若日期資料是在較晚時間取得，會標示 `retrospective`，不能解讀成官方規則已驗證。IGDB 與 Twitch 日期的對照分開計數，不能把兩個來源當成兩款遊戲。
+`newness_experiment` 列出每種來源可判定／未知的候選數及排除項數、推算 NEW 的遊戲 ID、尚未上市 ID，以及與有效官方觀察的 `reference_checks`。對照使用**官方標記當時**的時間及該來源窗口計算；若日期資料是在較晚時間取得，會標示 `retrospective`，不能解讀成官方規則已驗證。IGDB 與 Twitch 日期的對照分開計數，不能把兩個來源當成兩款遊戲。`coverage.excluded_by_igdb_date_count` 紀錄本輪因日期未命中而跳過量測的分類數；`igdb_categories_evaluated`／`igdb_categories_unknown` 包含已查日期但最後未達觀眾門檻的分類。
 
 #### 匯入 Twitch 原始日期
 
@@ -157,7 +159,7 @@ python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.j
 | `--max-collection-seconds` | `1500` | 整輪收集共用軟期限，預留工作保存／發布時間 |
 | `--verification-registry` | 專案的驗證 JSON | 直接觀察紀錄檔 |
 | `--release-dates` | `data/twitch_release_dates.json` | 有來源與擷取時間的 Twitch 原始發售日期匯入檔 |
-| `--no-release-hints` | 不啟用 | 加上此旗標即可略過 IGDB |
+| `--no-release-hints` | 不啟用 | 加上此旗標即可略過 IGDB 及其 30 天收集篩選 |
 | `--followers-cache` | `.cache/twitch_followers.json` | 追隨總數 24 小時快取，只保存在 runner／Actions cache |
 | `--followers-max-calls` | 不限制 | 可選診斷限制；設 0 只使用有效快取，正式排程不設定 |
 | `--followers-max-seconds` | 不另設限制 | 可選診斷限制；平常只受整輪收集期限約束 |

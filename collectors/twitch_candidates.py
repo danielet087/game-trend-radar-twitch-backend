@@ -1,7 +1,7 @@
 """Threshold discovery and stream census, separate from NEW-badge verification.
 
 Helix does not expose Twitch's NEW badge. Only dated, explicit observations
-may confirm it; the 14-day date experiment never overrides that classification.
+may confirm it. The IGDB 30-day collection filter never changes that verdict.
 """
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ from urllib3.util import Timeout
 from collectors.twitch_live import CollectionDeadlineExceeded, TwitchClient
 from collectors.twitch_audience import CACHE_PATH, FollowerResolver, attach_filtered_audience
 from collectors.twitch_newness import (
-    RELEASE_DATES_PATH, attach_experiments, load_release_dates, parse_timestamp, timestamp,
+    RELEASE_DATES_PATH, SOURCE_RULES, attach_experiments, evaluate_date,
+    load_release_dates, parse_timestamp, timestamp,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -150,7 +151,7 @@ def release_hints(client: TwitchClient, games: list[dict], now: datetime, *, dea
     if not ids:
         return {}, "no_igdb_ids"
     hints = {}
-    # One batch is at most 100 IDs. These dates are supporting evidence only.
+    # One batch is at most 100 IDs. Dates filter collection, never confirm NEW.
     for offset in range(0, len(ids), 100):
         query = "fields id,name,first_release_date; where id = (" + ",".join(ids[offset:offset + 100]) + "); limit 100;"
         try:
@@ -179,8 +180,9 @@ def release_hints(client: TwitchClient, games: list[dict], now: datetime, *, dea
                     continue
                 raw_date = row.get("first_release_date")
                 date = datetime.fromtimestamp(raw_date, timezone.utc) if type(raw_date) in (int, float) else None
-                age = (now - date).days if date else None
-                band = "unknown" if age is None else "upcoming" if age < 0 else "recent_release" if age <= 30 else "older_release"
+                age = now - date if date else None
+                window = timedelta(days=SOURCE_RULES["igdb_first_release_date"]["window_days"])
+                band = "unknown" if age is None else "upcoming" if age < timedelta(0) else "recent_release" if age < window else "older_release"
                 hints[str(row["id"])] = {
                     "source": "IGDB", "checked_at": timestamp(now),
                     "first_release_date": timestamp(date) if date else None,
@@ -226,6 +228,8 @@ def collect_candidates(
     seen_ids, seen_cursors = set(), set()
     measured_ids = set()
     below_ids = set()
+    hints, requested_igdb_ids, hints_statuses = {}, set(), []
+    igdb_predictions = {}
     after = None
     measured_count = below_count = 0
     stop_reason = None
@@ -236,18 +240,39 @@ def collect_candidates(
         games, cursor = reader.get("games/top", params)
         if cursor and cursor in seen_cursors:
             raise IncompleteCollection("Repeated category cursor")
+        # Validate and batch release metadata before any expensive stream census.
+        # Missing/failed metadata remains unknown and cannot exclude a category.
+        for game in games:
+            if not str(game.get("id") or "").isdigit() or not isinstance(game.get("name"), str) or not game["name"]:
+                raise IncompleteCollection("Invalid category metadata")
+        hints_clock = now or datetime.now(timezone.utc)
+        if include_release_hints:
+            metadata_games = [game for game in games
+                              if str(game["id"]) not in NON_GAME_IDS
+                              and str(game.get("igdb_id") or "").isdigit()
+                              and str(game["igdb_id"]) not in requested_igdb_ids]
+            if metadata_games:
+                page_hints, page_hints_status = release_hints(
+                    client, metadata_games, hints_clock, deadline=deadline, monotonic=monotonic,
+                )
+                hints.update(page_hints)
+                requested_igdb_ids.update(str(game["igdb_id"]) for game in metadata_games)
+                hints_statuses.append(page_hints_status)
         page_measured, page_qualified, page_new_measured = 0, 0, 0
         page_seen = set()
         for game in games:
             game_id = str(game.get("id") or "")
-            if not game_id.isdigit() or not isinstance(game.get("name"), str) or not game["name"]:
-                raise IncompleteCollection("Invalid category metadata")
             if game_id in page_seen:
                 continue
             page_seen.add(game_id)
             previously_seen = game_id in seen_ids
             seen_ids.add(game_id)
             verification = verification_for(game_id, observations, now or datetime.now(timezone.utc))
+            hint = hints.get(str(game.get("igdb_id")), {})
+            prediction = evaluate_date(hint.get("first_release_date"), hint.get("checked_at"), hints_clock,
+                                       source="igdb_first_release_date")
+            if game_id not in NON_GAME_IDS:
+                igdb_predictions[game_id] = prediction
             if game_id in NON_GAME_IDS or verification["status"] == "not_new":
                 candidates_by_id.pop(game_id, None)
                 channels_by_game.pop(game_id, None)
@@ -256,7 +281,21 @@ def collect_candidates(
                     "game_id": game_id, "game_name": game["name"],
                     "igdb_id": game.get("igdb_id") or None,
                     "reason": "non_game_category" if game_id in NON_GAME_IDS else "observed_not_new",
-                    "verification": verification, "metrics_collected": False,
+                    "verification": verification, "metrics_collected": False, "viewer_threshold_met": None,
+                }
+                continue
+            if prediction["status"] == "evaluated" and prediction["predicted_new"] is False:
+                candidates_by_id.pop(game_id, None)
+                channels_by_game.pop(game_id, None)
+                below_ids.discard(game_id)
+                excluded_by_id[game_id] = {
+                    "game_id": game_id, "game_name": game["name"],
+                    "igdb_id": game.get("igdb_id") or None,
+                    "reason": "igdb_release_outside_window", "verification": verification,
+                    "metrics_collected": False, "viewer_threshold_met": None,
+                    "exclusion_source": "igdb_first_release_date",
+                    "exclusion_window_days": prediction["window_days"],
+                    "release_evidence": hint,
                 }
                 continue
             excluded_by_id.pop(game_id, None)
@@ -287,10 +326,12 @@ def collect_candidates(
         if not cursor:
             stop_reason = "category_directory_exhausted"
             break
-        # Scan the entire page, not merely the first under-threshold category.
-        # A duplicate-only or excluded-only page still cannot establish a boundary.
+        # Scan every eligible game on this page, even after one below threshold.
+        # Skipped games have unknown viewer totals. This ranked-page heuristic
+        # considers measured eligible games only, not an exhaustive global proof.
+        # An excluded-only or duplicate-only page cannot establish the boundary.
         if page_new_measured and not page_qualified:
-            stop_reason = "whole_page_below_threshold"
+            stop_reason = "measured_eligible_page_below_threshold"
             break
         seen_cursors.add(cursor)
         after = cursor
@@ -298,11 +339,11 @@ def collect_candidates(
         raise IncompleteCollection("Category page limit reached before threshold boundary")
 
     candidates, excluded = list(candidates_by_id.values()), list(excluded_by_id.values())
-    metadata_games = candidates + [r for r in excluded if r["reason"] == "observed_not_new"]
-    hints_clock = now or datetime.now(timezone.utc)
-    hints, hints_status = (release_hints(client, metadata_games, hints_clock, deadline=deadline, monotonic=monotonic)
-                           if include_release_hints else ({}, "disabled"))
-    for row in candidates:
+    hints_status = ("disabled" if not include_release_hints else
+                    "collection_deadline_exhausted" if "collection_deadline_exhausted" in hints_statuses else
+                    "unavailable_or_partial" if "unavailable_or_partial" in hints_statuses else
+                    "ok" if hints_statuses else "no_igdb_ids")
+    for row in candidates + excluded:
         hint = hints.get(str(row["igdb_id"]))
         if hint:
             row["release_evidence"] = hint
@@ -311,7 +352,8 @@ def collect_candidates(
     queue = [r for r in candidates if r["verification"]["status"] == "pending"]
     queue.sort(key=lambda row: (priority[row.get("release_evidence", {}).get("release_band", "unknown")], -row["viewer_count"]))
     finished = now or datetime.now(timezone.utc)
-    experiment = attach_experiments(candidates, excluded, hints, release_dates, finished)
+    experiment = attach_experiments(candidates, excluded, hints, release_dates, finished,
+                                    igdb_predictions=igdb_predictions)
     follower_coverage = None
     if include_filtered_audience:
         resolver = FollowerResolver(client, followers_cache_path, max_calls=followers_max_calls,
@@ -333,12 +375,15 @@ def collect_candidates(
             "below_threshold_measurements": below_count,
             "below_threshold_count": len(below_ids),
             "excluded_before_metrics_count": len(excluded),
+            "excluded_by_igdb_date_count": sum(r["reason"] == "igdb_release_outside_window" for r in excluded),
+            "igdb_categories_evaluated": sum(p["status"] == "evaluated" for p in igdb_predictions.values()),
+            "igdb_categories_unknown": sum(p["status"] == "unknown" for p in igdb_predictions.values()),
             "helix_calls_excluding_retries": reader.calls + (follower_coverage["follower_lookup_calls"] if follower_coverage else 0),
             "census_helix_calls_excluding_retries": reader.calls,
             **({"filtered_audience": follower_coverage} if follower_coverage else {}),
             "global_metrics_are_sampled": False, "is_simultaneous_global_snapshot": False,
             "all_categories_enumerated": stop_reason == "category_directory_exhausted",
-            "discovery_note": "Uses Helix category ranking and stops after a whole measured page below threshold. Live rankings and streams can change during pagination; this is not proof of a simultaneous, exhaustive global census.",
+            "discovery_note": "Uses Helix category ranking and stops when a page has newly measured eligible categories but none measured reaches the threshold. Excluded categories have unmeasured viewer totals; excluded-only and duplicate-only pages continue. Live rankings and streams can change during pagination; this is not proof of a simultaneous, exhaustive global census.",
             "region_note": "Broadcast language is not broadcaster location; no Taiwan/Asia inference is applied.",
             "igdb_hints_status": hints_status,
         },

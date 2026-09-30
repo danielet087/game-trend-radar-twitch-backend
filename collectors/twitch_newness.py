@@ -12,9 +12,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 RELEASE_DATES_PATH = Path(__file__).resolve().parents[1] / "data/twitch_release_dates.json"
-WINDOW = timedelta(days=14)
 MAX_METADATA_AGE = timedelta(hours=24)
 SOURCES = ("twitch_original_release_date", "igdb_first_release_date")
+SOURCE_RULES = {
+    SOURCES[0]: {"window_days": 14, "rule": "glance_release_age_lt_14_days_v1"},
+    SOURCES[1]: {"window_days": 30, "rule": "igdb_release_age_lt_30_days_v1"},
+}
 
 
 def timestamp(value: datetime) -> str:
@@ -54,8 +57,10 @@ def load_release_dates(path: str | Path = RELEASE_DATES_PATH) -> dict:
 
 
 def evaluate_date(release_at: str | None, observed_at: str | None, now: datetime, *, source: str) -> dict:
+    rule = SOURCE_RULES[source]
+    window = timedelta(days=rule["window_days"])
     result = {
-        "source": source, "evaluated_at": timestamp(now),
+        "source": source, "evaluated_at": timestamp(now), **rule,
         "status": "unknown", "predicted_new": None,
         "confirms_twitch_new_badge": False,
     }
@@ -70,13 +75,14 @@ def evaluate_date(release_at: str | None, observed_at: str | None, now: datetime
         return {**result, "reason": "metadata_expired_or_future"}
     age = now - released
     return {
-        **result, "status": "evaluated", "predicted_new": age < WINDOW,
-        "release_phase": "upcoming" if age < timedelta(0) else "released_within_14_days" if age < WINDOW else "older_release",
+        **result, "status": "evaluated", "predicted_new": age < window,
+        "release_phase": "upcoming" if age < timedelta(0) else f"released_within_{rule['window_days']}_days" if age < window else "older_release",
         "age_hours": round(age.total_seconds() / 3600, 3),
     }
 
 
-def attach_experiments(candidates: list[dict], excluded: list[dict], hints: dict, dates: dict, now: datetime) -> dict:
+def attach_experiments(candidates: list[dict], excluded: list[dict], hints: dict, dates: dict, now: datetime,
+                       *, igdb_predictions: dict[str, dict] | None = None) -> dict:
     reference_checks = []
     for row in candidates + excluded:
         game_id = row["game_id"]
@@ -85,7 +91,11 @@ def attach_experiments(candidates: list[dict], excluded: list[dict], hints: dict
         twitch = evaluate_date(date.get("original_release_date"), date.get("observed_at"), now, source=SOURCES[0])
         if date:
             twitch.update({key: date[key] for key in ("source_name", "source_url", "source_field")})
-        igdb = evaluate_date(hint.get("first_release_date"), hint.get("checked_at"), now, source=SOURCES[1])
+        # Reuse the exact dated collection decision. A game crossing 30 days
+        # while its streams are measured must not acquire a contradictory
+        # "miss" result immediately before we enrich the accepted sample.
+        igdb = (dict(igdb_predictions[game_id]) if igdb_predictions is not None and game_id in igdb_predictions
+                else evaluate_date(hint.get("first_release_date"), hint.get("checked_at"), now, source=SOURCES[1]))
         row["release_experiment"] = dict(zip(SOURCES, (twitch, igdb)))
         verification = row.get("verification", {})
         if verification.get("status") not in {"new", "not_new"}:
@@ -96,9 +106,10 @@ def attach_experiments(candidates: list[dict], excluded: list[dict], hints: dict
         for source, prediction in row["release_experiment"].items():
             if prediction["status"] != "evaluated":
                 continue
-            at_badge_time = badge_at - parse_timestamp(prediction["release_at"]) < WINDOW
+            at_badge_time = badge_at - parse_timestamp(prediction["release_at"]) < timedelta(days=prediction["window_days"])
             reference_checks.append({
                 "game_id": game_id, "game_name": row["game_name"], "source": source,
+                "window_days": prediction["window_days"], "rule": prediction["rule"],
                 "badge_status": verification["status"], "badge_observed_at": verification["observed_at"],
                 "metadata_observed_at": prediction["metadata_observed_at"],
                 "predicted_new_at_badge_time": at_badge_time,
@@ -106,7 +117,7 @@ def attach_experiments(candidates: list[dict], excluded: list[dict], hints: dict
                 "comparison_kind": "same_timestamp" if parse_timestamp(prediction["metadata_observed_at"]) == badge_at else "retrospective",
             })
     report = {
-        "rule": "glance_release_age_lt_14_days_v1", "window_days": 14,
+        "rule": "source_specific_release_age_v2",
         "includes_future_releases": True, "experimental": True,
         "confirms_twitch_new_badge": False,
         "twitch_date_records_loaded": len(dates),
@@ -115,8 +126,11 @@ def attach_experiments(candidates: list[dict], excluded: list[dict], hints: dict
     }
     for source in SOURCES:
         evaluated = [r for r in candidates if r["release_experiment"][source]["status"] == "evaluated"]
+        evaluated_excluded = [r for r in excluded if r["release_experiment"][source]["status"] == "evaluated"]
         report[source] = {
+            **SOURCE_RULES[source],
             "evaluated_candidates": len(evaluated), "unknown_candidates": len(candidates) - len(evaluated),
+            "evaluated_excluded": len(evaluated_excluded), "unknown_excluded": len(excluded) - len(evaluated_excluded),
             "predicted_new_game_ids": [r["game_id"] for r in evaluated if r["release_experiment"][source]["predicted_new"]],
             "upcoming_game_ids": [r["game_id"] for r in evaluated if r["release_experiment"][source]["release_phase"] == "upcoming"],
         }

@@ -74,6 +74,49 @@ def test_history_preserves_experiment_without_promoting_pending_to_official_new(
     assert row["verification"]["status"] == "pending"
 
 
+def test_igdb_window_change_and_later_exclusion_preserve_original_history(tmp_path):
+    from collectors.twitch_newness import evaluate_date, parse_timestamp
+
+    old = snapshot("2026-09-28T16:07:00Z")
+    old["candidate_games"][0]["release_experiment"] = {
+        "igdb_first_release_date": {
+            "status": "evaluated", "predicted_new": False,
+            "release_at": "2026-09-08T00:00:00Z", "evaluated_at": old["generated_at"],
+            "confirms_twitch_new_badge": False,
+        }
+    }
+    relative = store_snapshot(old, tmp_path)
+    old_hour = json.loads((tmp_path / relative).read_text())["hours"]["2026-09-28T16:00:00Z"]
+
+    current = snapshot("2026-09-28T17:07:00Z")
+    current["candidate_games"][0]["release_experiment"] = {
+        source: evaluate_date("2026-09-08T00:00:00Z", current["generated_at"],
+                              parse_timestamp(current["generated_at"]), source=source)
+        for source in ("twitch_original_release_date", "igdb_first_release_date")
+    }
+    store_snapshot(current, tmp_path)
+    history = json.loads((tmp_path / relative).read_text())
+    saved = history["hours"]["2026-09-28T17:00:00Z"]["games"][0]["release_experiment"]
+    assert history["hours"]["2026-09-28T16:00:00Z"] == old_hour
+    assert saved == current["candidate_games"][0]["release_experiment"]
+    assert saved["twitch_original_release_date"]["window_days"] == 14
+    assert saved["twitch_original_release_date"]["predicted_new"] is False
+    assert saved["igdb_first_release_date"]["window_days"] == 30
+    assert saved["igdb_first_release_date"]["predicted_new"] is True
+
+    archive_before = (tmp_path / relative).read_bytes()
+    later = snapshot("2026-10-09T17:07:00Z")
+    later["candidate_games"] = []
+    later["excluded_games"] = [{
+        "game_id": "1", "game_name": "Example", "reason": "igdb_release_outside_window",
+        "metrics_collected": False, "viewer_threshold_met": None,
+    }]
+    later_relative = store_snapshot(later, tmp_path)
+    assert (tmp_path / relative).read_bytes() == archive_before
+    assert json.loads((tmp_path / later_relative).read_text())["hours"]["2026-10-09T17:00:00Z"]["games"] == []
+    assert json.loads((tmp_path / "data/twitch_live.json").read_text())["excluded_games"] == later["excluded_games"]
+
+
 def test_scheduled_history_accumulates_beyond_thirty_days_without_pruning(tmp_path):
     # Publishing a new day must preserve old files, including a month boundary.
     start = datetime(2026, 9, 29, 15, 7, tzinfo=timezone.utc)
