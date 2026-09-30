@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+from pathlib import Path
 
 from collectors.twitch_live import write_json
 from collectors.twitch_candidates import REGISTRY_PATH, collect_candidates as collect_twitch
 from collectors.twitch_newness import RELEASE_DATES_PATH
 from collectors.twitch_audience import CACHE_PATH
 from scripts.collection_guard import validate_slot
+from scripts.load_twitch_tracking import validate_persisted_tracking
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-dates", default=str(RELEASE_DATES_PATH), help="Dated Twitch originalReleaseDate export for the 14-day trial")
     parser.add_argument("--no-release-hints", action="store_true", help="Disable IGDB metadata and its 30-day collection filter")
     parser.add_argument("--followers-cache", default=str(CACHE_PATH), help="Runner-local daily follower-total cache")
+    parser.add_argument("--tracking-state", help="Persisted frontend tracking registry; required for scheduled collection")
     parser.add_argument("--followers-max-calls", type=int, default=None,
                         help="Optional diagnostic follower request cap; default: no separate cap")
     parser.add_argument("--followers-max-seconds", type=float, default=None,
@@ -47,6 +51,11 @@ def main() -> None:
     if not client_id or not client_secret:
         raise SystemExit("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are required")
 
+    if not args.tracking_state and (args.trigger_source != "manual" or os.environ.get("GITHUB_RUN_ID")):
+        raise SystemExit("--tracking-state is required for production collection; refusing to reset enrollments")
+    tracking_state = (validate_persisted_tracking(json.loads(Path(args.tracking_state).read_text(encoding="utf-8")))
+                      if args.tracking_state else None)
+
     payload = collect_twitch(
         client_id=client_id,
         client_secret=client_secret,
@@ -62,6 +71,7 @@ def main() -> None:
         followers_cache_path=args.followers_cache,
         followers_max_calls=args.followers_max_calls,
         followers_max_seconds=args.followers_max_seconds,
+        tracking_state=tracking_state,
     )
     if args.target_slot:
         payload["collection_schedule"] = {
@@ -79,6 +89,8 @@ def main() -> None:
         f"{len(payload['top_games'])} verified NEW, "
         f"{len(payload['pending_verification'])} pending -> {path}"
     )
+    print(f"Persistent new-game observation: {len(payload.get('tracked_games', []))} active games; "
+          "the 7,000-viewer threshold applies only to initial enrollment.")
     print(f"Twitch {twitch_trial['window_days']}-day trial: {twitch_trial['evaluated_candidates']} evaluated / "
           f"{twitch_trial['unknown_candidates']} unknown; IGDB {igdb_trial['window_days']}-day filter: "
           f"{igdb_trial['evaluated_candidates']} evaluated candidates / "
@@ -100,6 +112,7 @@ def main() -> None:
                 "### Twitch 候選掃描\n\n"
                 f"- 門檻：{args.min_viewers:,} 人\n"
                 f"- 達標候選：{len(payload['candidate_games'])} 款\n"
+                f"- 持續觀測新作：{len(payload.get('tracked_games', []))} 款（收錄後低於門檻仍持續）\n"
                 f"- 已確認全新：{len(payload['top_games'])} 款\n"
                 f"- 待驗證：{len(payload['pending_verification'])} 款\n"
                 f"- 暫時排除：{len(payload['excluded_games'])} 類\n"

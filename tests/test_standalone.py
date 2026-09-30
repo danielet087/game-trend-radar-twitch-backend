@@ -8,6 +8,8 @@ import sys
 
 import pytest
 
+from tests.test_twitch_tracking_storage import tracking_state
+
 PLATFORM = 'twitch'
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,10 +33,12 @@ def test_publish_retry_preserves_concurrent_frontend_changes(tmp_path):
     config = tmp_path/'gitconfig'
     config.write_text(f'[url "{remote.as_uri()}"]\n\tinsteadOf = https://github.com/danielet087/game-trend-radar.git\n')
     snapshot = tmp_path/f'{PLATFORM}_live.json'
+    registry = tracking_state(at="2026-09-28T16:30:00Z")
+    concurrent_registry = tracking_state("2", at="2026-09-28T16:31:00Z")
     snapshot.write_text(json.dumps({
         "schema_version": 2, "generated_at": "2026-09-28T16:30:00Z", "collection_started_at": "2026-09-28T16:29:00Z",
         "min_viewers": 7000, "coverage": {"collection_complete": True, "stop_reason": "category_directory_exhausted"},
-        "candidate_games": [], "top_games": [],
+        "candidate_games": [], "top_games": [], "tracking_state": registry,
     }))
     real_git = shutil.which('git')
     wrapper_dir = tmp_path/'bin'
@@ -50,6 +54,7 @@ if 'push' in sys.argv and not marker.exists():
     marker.touch()
     (seed/'data/catalog.json').write_text('{{"version": 2}}')
     (seed/'data/other-live.json').write_text('{{"keep": true}}')
+    (seed/'data/twitch_tracking.json').write_text({json.dumps(concurrent_registry)!r})
     for args in [('add','.'),('commit','-m','concurrent frontend update'),('push','origin','main')]:
         subprocess.run([real,'-C',str(seed),*args],check=True,capture_output=True)
 os.execv(real,[real,*sys.argv[1:]])
@@ -66,9 +71,12 @@ os.execv(real,[real,*sys.argv[1:]])
     assert git('--git-dir',remote,'show','main:data/other-live.json') == '{"keep": true}'
     assert json.loads(git('--git-dir',remote,'show',f'main:data/{PLATFORM}_live.json'))['top_games'] == []
     changed = set(git('--git-dir',remote,'diff-tree','--no-commit-id','--name-only','-r','main').splitlines())
-    assert changed == {'data/twitch_live.json', 'data/twitch_history/2026-09-29.json'}
+    assert changed == {'data/twitch_live.json', 'data/twitch_history/2026-09-29.json', 'data/twitch_tracking.json'}
     history = json.loads(git('--git-dir',remote,'show','main:data/twitch_history/2026-09-29.json'))
     assert len(history['hours']) == 1
+    saved_registry = json.loads(git('--git-dir',remote,'show','main:data/twitch_tracking.json'))
+    assert set(saved_registry['games']) == {'1', '2'}
+    assert saved_registry['updated_at'] == concurrent_registry['updated_at']
     assert 'fixture-only-token' not in run.stdout+run.stderr
 
 
@@ -91,3 +99,34 @@ def test_cli_rejects_missing_platform_credentials_before_collection(monkeypatch)
     monkeypatch.setattr(module,f'collect_{PLATFORM}',lambda **kwargs: pytest.fail('Must not call API'))
     with pytest.raises(SystemExit,match='required'):
         module.main()
+
+
+def test_production_cli_requires_registry_before_api_calls(monkeypatch):
+    from scripts import update_twitch
+
+    monkeypatch.setenv('TWITCH_CLIENT_ID', 'fixture-client')
+    monkeypatch.setenv('TWITCH_CLIENT_SECRET', 'fixture-secret')
+    monkeypatch.setenv('GITHUB_RUN_ID', '123')
+    monkeypatch.setattr(sys, 'argv', ['collector'])
+    monkeypatch.setattr(update_twitch, 'collect_twitch', lambda **kwargs: pytest.fail('Must not call API'))
+    with pytest.raises(SystemExit, match='tracking-state'):
+        update_twitch.main()
+
+
+def test_cli_passes_persisted_registry_to_collector(tmp_path, monkeypatch):
+    from scripts import update_twitch
+
+    state = tracking_state()
+    path = tmp_path / 'state.json'
+    path.write_text(json.dumps(state))
+    monkeypatch.setenv('TWITCH_CLIENT_ID', 'fixture-client')
+    monkeypatch.setenv('TWITCH_CLIENT_SECRET', 'fixture-secret')
+    monkeypatch.setattr(sys, 'argv', ['collector', '--tracking-state', str(path)])
+
+    def stop_after_validation(**kwargs):
+        assert kwargs['tracking_state'] == state
+        raise RuntimeError('collector received persisted enrollments')
+
+    monkeypatch.setattr(update_twitch, 'collect_twitch', stop_after_validation)
+    with pytest.raises(RuntimeError, match='persisted enrollments'):
+        update_twitch.main()

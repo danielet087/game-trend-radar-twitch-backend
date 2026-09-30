@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 import math
@@ -9,9 +10,72 @@ from pathlib import Path
 
 from collectors.twitch_candidates import parse_timestamp, timestamp
 from collectors.twitch_live import write_json
+from collectors.twitch_tracking import normalize_tracking_state
+from scripts.load_twitch_tracking import validate_persisted_tracking
 
 TAIPEI = timezone(timedelta(hours=8))
 STATUS_PATH = "data/twitch_collection_status.json"
+TRACKING_PATH = "data/twitch_tracking.json"
+
+
+def merge_tracking_state(existing: dict | None, incoming: dict) -> dict:
+    """Union enrollments when publishing against a newer frontend checkout.
+
+    A late result may contribute a previously unknown enrollment, but cannot
+    rewind an entry's metadata, status or most recent real observation. A
+    terminal status is not deleted: it remains a tombstone for later readers.
+    """
+    new = validate_persisted_tracking(incoming)
+    if existing is None:
+        return new
+    old = validate_persisted_tracking(existing)
+    new_time, old_time = (parse_timestamp(state["updated_at"]) for state in (new, old))
+    result = deepcopy(new if new_time >= old_time else old)
+    result["games"] = {}
+    for game_id in sorted(set(old["games"]) | set(new["games"])):
+        previous, current = old["games"].get(game_id), new["games"].get(game_id)
+        if previous is None or current is None:
+            result["games"][game_id] = deepcopy(current if previous is None else previous)
+            continue
+        old_updated = parse_timestamp(previous.get("updated_at", old["updated_at"]))
+        new_updated = parse_timestamp(current.get("updated_at", new["updated_at"]))
+        merged = deepcopy(current if new_updated >= old_updated else previous)
+        # Enrollment is historical evidence and may have been recovered while
+        # this job was running. Keep the earliest evidence rather than resetting
+        # first_seen_at to the next time that viewers cross the discovery bar.
+        for field in ("first_seen_at", "enrolled_at"):
+            values = [entry[field] for entry in (previous, current) if entry.get(field)]
+            if values:
+                merged[field] = min(values, key=parse_timestamp)
+        enrollments = [entry["enrollment"] for entry in (previous, current)
+                       if isinstance(entry.get("enrollment"), dict) and entry["enrollment"].get("observed_at")]
+        if enrollments:
+            merged["enrollment"] = deepcopy(min(enrollments, key=lambda item: parse_timestamp(item["observed_at"])))
+        observations = [entry["last_observation"] for entry in (previous, current)
+                        if isinstance(entry.get("last_observation"), dict)]
+        if observations:
+            merged["last_observation"] = deepcopy(max(observations,
+                key=lambda item: parse_timestamp(item["observation_at"])))
+        seen_at = [entry["last_seen_at"] for entry in (previous, current) if entry.get("last_seen_at")]
+        if seen_at:
+            merged["last_seen_at"] = max(seen_at, key=parse_timestamp)
+        result["games"][game_id] = merged
+    # Reconcile expiry at the newest state time without deleting retained rows.
+    return normalize_tracking_state(result, now=max(new_time, old_time))
+
+
+def observed_rows(payload: dict) -> list[dict]:
+    """Deduplicate discovery and enrolled games; only real observations belong in history."""
+    rows = {row["game_id"]: row for row in payload["candidate_games"]}
+    for row in payload.get("tracked_games", []):
+        previous = rows.get(row["game_id"])
+        if previous is not None and any(previous.get(field) != row.get(field) for field in (
+            "viewer_count", "streamer_count", "median_viewer_count",
+            "measurement_started_at", "measurement_finished_at", "filtered_audience",
+        )):
+            raise ValueError("Candidate and tracked observations disagree")
+        rows[row["game_id"]] = row
+    return list(rows.values())
 
 
 def validate_schedule(payload: dict) -> dict | None:
@@ -96,18 +160,38 @@ def validate_snapshot(payload: dict) -> None:
         raise ValueError("Invalid threshold")
     if not isinstance(payload.get("candidate_games"), list):
         raise ValueError("Missing candidate list")
+    tracked = payload.get("tracked_games", [])
+    if not isinstance(tracked, list):
+        raise ValueError("Invalid tracked game list")
+    tracking = validate_persisted_tracking(payload["tracking_state"]) if "tracking_state" in payload else None
+    if tracked and tracking is None:
+        raise ValueError("Tracked observations require their persistent registry")
+    for row in tracked:
+        entry = tracking["games"].get(row.get("game_id"), {})
+        if entry.get("status") != "active" or row.get("observation_status") != "current":
+            raise ValueError("Only active, freshly observed tracked games may be published")
+    candidate_ids = {row.get("game_id") for row in payload["candidate_games"]}
+    for group in (payload["candidate_games"], tracked):
+        ids = [row.get("game_id") for row in group]
+        if len(set(ids)) != len(ids):
+            raise ValueError("Invalid or duplicate game ID")
     seen = set()
-    for row in payload["candidate_games"]:
+    for row in observed_rows(payload):
         game_id = row["game_id"]
         if not isinstance(game_id, str) or not game_id.isdigit() or game_id in seen:
             raise ValueError("Invalid or duplicate game ID")
         seen.add(game_id)
-        if row.get("pagination_complete") is not True or row.get("verification", {}).get("status") not in {"new", "pending"}:
+        allowed_statuses = {"new", "pending"} if game_id in candidate_ids else {"new", "pending", "not_new"}
+        if row.get("pagination_complete") is not True or row.get("verification", {}).get("status") not in allowed_statuses:
             raise ValueError("Unfinished or excluded category in candidate list")
         viewers, streamers, middle = row.get("viewer_count"), row.get("streamer_count"), row.get("median_viewer_count")
-        if type(viewers) is not int or viewers < payload["min_viewers"] or type(streamers) is not int or streamers < 1:
+        minimum = payload["min_viewers"] if game_id in candidate_ids else 0
+        if type(viewers) is not int or viewers < minimum or type(streamers) is not int or streamers < 0:
             raise ValueError("Invalid candidate metrics")
-        if type(middle) not in (float, int) or not 0 <= middle <= viewers:
+        if streamers == 0:
+            if game_id in candidate_ids or viewers != 0 or middle is not None:
+                raise ValueError("An empty stream census must have zero viewers and no median")
+        elif type(middle) not in (float, int) or not math.isfinite(middle) or not 0 <= middle <= viewers:
             raise ValueError("Invalid median")
         if "filtered_audience" in row:
             validate_filtered_audience(row["filtered_audience"], viewers=viewers, streamers=streamers)
@@ -137,6 +221,12 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
     status_path = frontend / STATUS_PATH
     status = json.loads(status_path.read_text(encoding="utf-8")) if scheduled and status_path.exists() else None
     status_order = validate_receipt(status) if status is not None else None
+    tracking_path = frontend / TRACKING_PATH
+    tracking = json.loads(tracking_path.read_text(encoding="utf-8")) if tracking_path.exists() else None
+    if tracking_path.exists():
+        validate_persisted_tracking(tracking)
+    merged_tracking = (merge_tracking_state(tracking, payload["tracking_state"])
+                       if "tracking_state" in payload else tracking)
     order = observation_order(payload)
     update_latest = latest is None or order > observation_order(latest)
     # Receipt and latest must describe the same result. A stale publication may
@@ -155,15 +245,24 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
                 {**{key: row[key] for key in (
                     "game_id", "game_name", "viewer_count", "streamer_count", "median_viewer_count",
                     "measurement_started_at", "measurement_finished_at", "verification",
-                )}, **{key: row[key] for key in ("release_experiment", "filtered_audience") if key in row}}
-                for row in payload["candidate_games"]
+                )}, **{key: row[key] for key in ("release_experiment", "filtered_audience", "tracking",
+                                                "observation_status", "observation_at") if key in row}}
+                for row in observed_rows(payload)
             ],
         }
         history["hours"] = dict(sorted(history["hours"].items()))
         write_json(history, history_path)
     if update_latest:
-        write_json(payload, latest_path)
-    if scheduled and (update_latest or latest == payload) and (status_order is None or order >= status_order):
+        latest_payload = deepcopy(payload)
+        if merged_tracking is not None and "tracking_state" in payload:
+            latest_payload["tracking_state"] = merged_tracking
+        write_json(latest_payload, latest_path)
+    if merged_tracking is not None and merged_tracking != tracking:
+        write_json(merged_tracking, tracking_path)
+    same_observation = (latest is not None and
+                        {key: value for key, value in latest.items() if key != "tracking_state"} ==
+                        {key: value for key, value in payload.items() if key != "tracking_state"})
+    if scheduled and (update_latest or same_observation) and (status_order is None or order >= status_order):
         receipt = {
             "schema_version": 1,
             "observed_slot": hour,

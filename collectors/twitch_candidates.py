@@ -24,6 +24,9 @@ from collectors.twitch_newness import (
     RELEASE_DATES_PATH, SOURCE_RULES, attach_experiments, evaluate_date,
     load_release_dates, parse_timestamp, timestamp,
 )
+from collectors.twitch_tracking import (
+    enroll_observation, normalize_tracking_state, reconcile_tracking_entry,
+)
 
 LOGGER = logging.getLogger(__name__)
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "data/twitch_category_verification.json"
@@ -212,6 +215,7 @@ def collect_candidates(
     followers_max_calls: int | None = None, followers_max_seconds: float | None = None,
     max_collection_seconds: float = 1500,
     monotonic: Callable[[], float] = time.monotonic,
+    tracking_state: dict | None = None,
 ) -> dict[str, Any]:
     collection_started = monotonic()
     if not math.isfinite(max_collection_seconds) or max_collection_seconds <= 0:
@@ -220,6 +224,7 @@ def collect_candidates(
     if min(min_viewers, max_category_pages, max_stream_pages, max_api_calls) < 1 or not 1 <= category_page_size <= 100:
         raise ValueError("Threshold and limits must be positive; page size must be 1..100")
     clock = now or datetime.now(timezone.utc)
+    tracking = normalize_tracking_state(tracking_state, clock, non_game_ids=NON_GAME_IDS)
     observations = load_verifications(registry_path)
     release_dates = load_release_dates(release_dates_path)
     client = client or TwitchClient(client_id, client_secret, request_interval=0.3)
@@ -227,6 +232,7 @@ def collect_candidates(
         client.collection_deadline, client.monotonic = deadline, monotonic
     reader = PageReader(client, max_api_calls, deadline=deadline, monotonic=monotonic)
     candidates_by_id, excluded_by_id = {}, {}
+    retained_by_id = {}
     channels_by_game: dict[str, list[dict]] = {}
     seen_ids, seen_cursors = set(), set()
     measured_ids = set()
@@ -236,6 +242,27 @@ def collect_candidates(
     after = None
     measured_count = below_count = 0
     stop_reason = None
+
+    def refresh_tracking(game: dict, prediction: dict, at: datetime) -> dict | None:
+        entry = tracking["games"].get(str(game["id"]))
+        if entry is None:
+            return None
+        for source_key, target_key in (("name", "game_name"), ("igdb_id", "igdb_id"), ("box_art_url", "box_art_url")):
+            if game.get(source_key):
+                entry[target_key] = game[source_key]
+        released = prediction.get("release_at") if prediction.get("status") == "evaluated" else None
+        release_source = "igdb_first_release_date" if released else None
+        if not released:
+            dated = release_dates.get(str(game["id"]), {})
+            trial = evaluate_date(dated.get("original_release_date"), dated.get("observed_at"), at,
+                                  source="twitch_original_release_date")
+            if trial.get("status") == "evaluated":
+                released, release_source = trial.get("release_at"), "twitch_original_release_date"
+        reconcile_tracking_entry(entry, at, release_at=released, release_source=release_source,
+                                 non_game_ids=NON_GAME_IDS)
+        entry["updated_at"] = timestamp(at)
+        return entry
+
     for page_index in range(max_category_pages):
         params: dict[str, Any] = {"first": category_page_size}
         if after:
@@ -274,9 +301,11 @@ def collect_candidates(
             hint = hints.get(str(game.get("igdb_id")), {})
             prediction = evaluate_date(hint.get("first_release_date"), hint.get("checked_at"), hints_clock,
                                        source="igdb_first_release_date")
+            tracked_entry = refresh_tracking(game, prediction, hints_clock)
+            already_tracking = tracked_entry is not None and tracked_entry["status"] == "active"
             if game_id not in NON_GAME_IDS:
                 igdb_predictions[game_id] = prediction
-            if game_id in NON_GAME_IDS or verification["status"] == "not_new":
+            if game_id in NON_GAME_IDS or (verification["status"] == "not_new" and not already_tracking):
                 candidates_by_id.pop(game_id, None)
                 channels_by_game.pop(game_id, None)
                 below_ids.discard(game_id)
@@ -287,7 +316,8 @@ def collect_candidates(
                     "verification": verification, "metrics_collected": False, "viewer_threshold_met": None,
                 }
                 continue
-            if prediction["status"] == "evaluated" and prediction["predicted_new"] is False:
+            if (prediction["status"] == "evaluated" and prediction["predicted_new"] is False
+                    or tracked_entry is not None and tracked_entry["status"] != "active"):
                 candidates_by_id.pop(game_id, None)
                 channels_by_game.pop(game_id, None)
                 below_ids.discard(game_id)
@@ -297,7 +327,7 @@ def collect_candidates(
                     "reason": "igdb_release_outside_window", "verification": verification,
                     "metrics_collected": False, "viewer_threshold_met": None,
                     "exclusion_source": "igdb_first_release_date",
-                    "exclusion_window_days": prediction["window_days"],
+                    "exclusion_window_days": 30,
                     "release_evidence": hint,
                 }
                 continue
@@ -310,19 +340,30 @@ def collect_candidates(
             measured_ids.add(game_id)
             page_measured += 1
             page_new_measured += int(not previously_seen)
-            if metrics["viewer_count"] < min_viewers:
-                below_count += 1
-                below_ids.add(game_id)
-                candidates_by_id.pop(game_id, None)
-                channels_by_game.pop(game_id, None)
-                continue
-            page_qualified += 1
-            below_ids.discard(game_id)
-            candidates_by_id[game_id] = {
+            row = {
                 "game_id": game_id, "game_name": game["name"],
                 "box_art_url": game.get("box_art_url"), "igdb_id": game.get("igdb_id") or None,
                 "verification": verification, **metrics,
             }
+            if already_tracking:
+                retained_by_id[game_id] = row
+                if channels is not None:
+                    channels_by_game[game_id] = channels
+            if metrics["viewer_count"] < min_viewers:
+                below_count += 1
+                below_ids.add(game_id)
+                candidates_by_id.pop(game_id, None)
+                if not already_tracking:
+                    channels_by_game.pop(game_id, None)
+                continue
+            page_qualified += 1
+            below_ids.discard(game_id)
+            if verification["status"] == "not_new":
+                # A vanished badge cannot evict an existing enrollment, but
+                # this row no longer belongs to new-admission discovery.
+                candidates_by_id.pop(game_id, None)
+                continue
+            candidates_by_id[game_id] = row
             if channels is not None:
                 channels_by_game[game_id] = channels
         LOGGER.info("Category page %d: %d scanned, %d measured, %d qualifying", page_index + 1, len(games), page_measured, page_qualified)
@@ -341,12 +382,58 @@ def collect_candidates(
     else:
         raise IncompleteCollection("Category page limit reached before threshold boundary")
 
+    # Ranking is only discovery. Every active enrollment also gets its own
+    # complete census, even when it has disappeared from the top directory.
+    missing = [entry for game_id, entry in tracking["games"].items()
+               if entry["status"] == "active" and game_id not in retained_by_id]
+    restored_metadata = {}
+    for offset in range(0, len(missing), 100):
+        ids = [entry["game_id"] for entry in missing[offset:offset + 100]]
+        metadata, _ = reader.get("games", {"id": ids})
+        for game in metadata:
+            game_id = str(game.get("id") or "")
+            if game_id not in ids or not isinstance(game.get("name"), str) or not game["name"]:
+                raise IncompleteCollection("Invalid tracked category metadata")
+            restored_metadata[game_id] = game
+    missing_games = [{"id": entry["game_id"], "name": entry["game_name"],
+                      "igdb_id": entry.get("igdb_id"), "box_art_url": entry.get("box_art_url"),
+                      **restored_metadata.get(entry["game_id"], {})} for entry in missing]
+    metadata_games = [game for game in missing_games if str(game.get("igdb_id") or "").isdigit()
+                      and str(game["igdb_id"]) not in requested_igdb_ids]
+    hints_clock = now or datetime.now(timezone.utc)
+    if include_release_hints and metadata_games:
+        extra_hints, status = release_hints(client, metadata_games, hints_clock, deadline=deadline, monotonic=monotonic)
+        hints.update(extra_hints)
+        hints_statuses.append(status)
+        requested_igdb_ids.update(str(game["igdb_id"]) for game in metadata_games)
+    for game in missing_games:
+        game_id = str(game["id"])
+        hint = hints.get(str(game.get("igdb_id")), {})
+        prediction = evaluate_date(hint.get("first_release_date"), hint.get("checked_at"), hints_clock,
+                                   source="igdb_first_release_date")
+        igdb_predictions[game_id] = prediction
+        entry = refresh_tracking(game, prediction, hints_clock)
+        if entry["status"] != "active":
+            continue
+        metrics = category_metrics(reader, game_id, max_stream_pages, retain_channels=include_filtered_audience)
+        channels = metrics.pop("_channels", None)
+        measured_count += 1
+        measured_ids.add(game_id)
+        retained_by_id[game_id] = {
+            "game_id": game_id, "game_name": game["name"], "igdb_id": game.get("igdb_id") or None,
+            "box_art_url": game.get("box_art_url"), "verification": verification_for(game_id, observations, hints_clock),
+            **metrics,
+        }
+        if channels is not None:
+            channels_by_game[game_id] = channels
+
     candidates, excluded = list(candidates_by_id.values()), list(excluded_by_id.values())
+    measured_rows = {**retained_by_id, **candidates_by_id}
     hints_status = ("disabled" if not include_release_hints else
                     "collection_deadline_exhausted" if "collection_deadline_exhausted" in hints_statuses else
                     "unavailable_or_partial" if "unavailable_or_partial" in hints_statuses else
                     "ok" if hints_statuses else "no_igdb_ids")
-    for row in candidates + excluded:
+    for row in list(measured_rows.values()) + excluded:
         hint = hints.get(str(row["igdb_id"]))
         if hint:
             row["release_evidence"] = hint
@@ -357,13 +444,24 @@ def collect_candidates(
     finished = now or datetime.now(timezone.utc)
     experiment = attach_experiments(candidates, excluded, hints, release_dates, finished,
                                     igdb_predictions=igdb_predictions)
+    retained_only = [row for game_id, row in retained_by_id.items() if game_id not in candidates_by_id]
+    attach_experiments(retained_only, [], hints, release_dates, finished, igdb_predictions=igdb_predictions)
     follower_coverage = None
     if include_filtered_audience:
         resolver = FollowerResolver(client, followers_cache_path, max_calls=followers_max_calls,
                                     max_seconds=followers_max_seconds, collection_deadline=deadline,
                                     monotonic=monotonic, utcnow=(lambda: now) if now else None)
-        follower_coverage = attach_filtered_audience(candidates, channels_by_game, resolver)
+        follower_coverage = attach_filtered_audience(list(measured_rows.values()), channels_by_game, resolver)
         finished = now or datetime.now(timezone.utc)
+    for row in measured_rows.values():
+        # Preserve the exact pre-census date decision at a 30-day boundary.
+        decision_at = igdb_predictions.get(row["game_id"], {}).get("evaluated_at")
+        enroll_observation(tracking, row, finished, min_viewers=min_viewers, non_game_ids=NON_GAME_IDS,
+                           eligibility_at=parse_timestamp(decision_at) if decision_at else clock)
+    tracking["updated_at"] = timestamp(finished)
+    tracked = [row for row in measured_rows.values()
+               if tracking["games"].get(row["game_id"], {}).get("status") == "active"]
+    tracked.sort(key=lambda row: (-row["viewer_count"], row["game_id"]))
     return {
         "schema_version": 2, "generated_at": timestamp(finished), "collection_started_at": timestamp(clock),
         "source": "Twitch Helix API", "min_viewers": min_viewers,
@@ -389,11 +487,15 @@ def collect_candidates(
             "discovery_note": "Uses Helix category ranking and stops when a page has newly measured eligible categories but none measured reaches the threshold. Excluded categories have unmeasured viewer totals; excluded-only and duplicate-only pages continue. Live rankings and streams can change during pagination; this is not proof of a simultaneous, exhaustive global census.",
             "region_note": "Broadcast language is not broadcaster location; no Taiwan/Asia inference is applied.",
             "igdb_hints_status": hints_status,
+            "tracked_active_count": len(tracked),
+            "tracked_outside_discovery_count": sum(row["game_id"] not in candidates_by_id for row in tracked),
+            "tracking_note": "The viewer threshold admits new games. Active enrollments remain monitored until 30 days after their known release; directory absence and badge disappearance do not remove them.",
         },
         "candidate_games": candidates,
         "top_games": [r for r in candidates if r["verification"]["status"] == "new"],
         "pending_verification": [r["game_id"] for r in queue],
         "excluded_games": excluded,
         "newness_experiment": experiment,
-        "tracked_games": [],
+        "tracked_games": tracked,
+        "tracking_state": tracking,
     }
