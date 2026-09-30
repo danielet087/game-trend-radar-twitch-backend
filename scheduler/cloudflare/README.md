@@ -42,18 +42,38 @@ GitHub 原本第 17 分的排程保留為備援。所有入口進入同一 concu
 
 不要把 token 放進程式、`wrangler.toml`、GitHub commit 或聊天訊息。
 
-### 方法 A：Cloudflare 控制台貼上程式
+### 方法 A：Cloudflare 連接 GitHub 自動部署（目前採用）
 
-1. 在 Workers & Pages 建立 Worker，名稱使用 `game-trend-radar-twitch-watchdog`。
+已建立的 Cloudflare Worker 名稱是 `game-trend-radar-twitch-backend`，必須與 `wrangler.toml` 的 `name` 相同；它仍然只是排程監控器，Python 收集器繼續在 GitHub Actions 執行。
+
+連接 `danielet087/game-trend-radar-twitch-backend` 儲存庫，設定如下：
+
+| 設定 | 值 |
+| --- | --- |
+| Worker 名稱 | `game-trend-radar-twitch-backend` |
+| Production branch | `main` |
+| Root directory / Path | `scheduler/cloudflare` |
+| Build command | `node --test test/*.test.mjs` |
+| Deploy command | `npx wrangler deploy` |
+
+部署成功後，在 Worker 的 **Settings → Variables and Secrets** 新增 **Secret** `GITHUB_ACTIONS_TOKEN`，填入上述 GitHub token 並套用變更。不要填在 Build variables and secrets；建置用 Secret 不會自動成為執行時的 Secret。
+
+Git 連接方式會執行 Wrangler 並套用設定檔，包括每 5 分鐘 Cron、一般變數、日誌與關閉 HTTP 路由。`No URLs enabled` 是預期設定，不需要新增網域。往後推送 `main` 會依 Cloudflare Builds 的分支與路徑設定觸發部署；程式成功部署不等於已成功觸發採集，仍需確認 Secret、Cron 與執行紀錄。
+
+若出現 `Latest build failed`，開啟該次建置日誌確認錯誤。Worker 名稱與設定檔不一致會造成 Git 連接部署失敗；修正後應部署最新 commit，不要只重試舊 commit。成功後從 Observability 查看 `dispatch`、`already_published` 或 `workflow_active` 等結果，再對照 GitHub Actions 與前端回條。新 Cron 的設定傳播可能需要最多 15 分鐘。
+
+### 方法 B：Cloudflare 控制台貼上程式
+
+1. 在 Workers & Pages 建立 Worker，名稱使用 `game-trend-radar-twitch-backend`。若已建立或連接 GitHub，直接使用既有 Worker，不要另建第二個監控器。
 2. 將 `src/worker.mjs` 的完整內容貼入編輯器並部署。程式無外部依賴，可以直接使用；尚未加入 Cron 時不會收集。
 3. 在 Worker 設定的 Variables and Secrets 加入 **Secret** `GITHUB_ACTIONS_TOKEN`，值為上述 GitHub token，套用變更。其餘設定已有程式預設值。
 4. 在 Domains & Routes 停用 `workers.dev` 路由與 Preview URLs；這個 Worker 只需要排程，即使誤開網址也只會回傳 404。
 5. 在 Triggers / Cron Triggers 加入 `*/5 * * * *`。Cron 使用 UTC，新增或修改可能需要最多 15 分鐘傳播。
 6. 從 Worker Logs / Observability 查看下一次檢查結果；搭配 GitHub Actions 確認開始執行，再確認前端回條出現並與歷史 JSON 一起更新。
 
-控制台不會自動套用儲存庫的 `wrangler.toml`。因此需要手動設定 Secret、Cron 與路由；若日後改用 CLI 部署，會以該設定檔為準。
+僅貼上程式的方式不會自動套用儲存庫的 `wrangler.toml`，因此需要手動設定 Secret、Cron 與路由；若日後改用 Git 連接或 CLI 部署，會以該設定檔為準。
 
-### 方法 B：Wrangler CLI
+### 方法 C：Wrangler CLI
 
 從此目錄執行（Node.js 22 或更新版本）：
 
