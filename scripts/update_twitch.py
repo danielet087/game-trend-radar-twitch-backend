@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -11,11 +12,12 @@ from collectors.twitch_candidates import REGISTRY_PATH, collect_candidates as co
 from collectors.twitch_newness import RELEASE_DATES_PATH
 from collectors.twitch_audience import CACHE_PATH
 from scripts.collection_guard import validate_slot
-from scripts.load_twitch_tracking import validate_persisted_tracking
+from scripts.load_twitch_tracking import validate_persisted_mapping, validate_persisted_tracking
+from collectors.steam_twitch_mapping import normalize_steam_catalog
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Collect Twitch categories with at least 7,000 viewers and queue NEW-badge verification.")
+    parser = argparse.ArgumentParser(description="Collect independent Twitch new-game discoveries and matched Steam recent releases by Twitch ID.")
     parser.add_argument("--output", default="output/twitch_live.json")
     parser.add_argument("--min-viewers", type=int, default=7000)
     parser.add_argument("--max-category-pages", type=int, default=5)
@@ -28,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-release-hints", action="store_true", help="Disable IGDB metadata and its 30-day collection filter")
     parser.add_argument("--followers-cache", default=str(CACHE_PATH), help="Runner-local daily follower-total cache")
     parser.add_argument("--tracking-state", help="Persisted frontend tracking registry; required for scheduled collection")
+    parser.add_argument("--steam-catalog", help="Curated Steam catalog from the same frontend commit as the tracking registry")
+    parser.add_argument("--steam-mapping", help="Persisted Steam AppID / IGDB / Twitch ID mapping from that frontend commit")
     parser.add_argument("--followers-max-calls", type=int, default=None,
                         help="Optional diagnostic follower request cap; default: no separate cap")
     parser.add_argument("--followers-max-seconds", type=float, default=None,
@@ -51,10 +55,22 @@ def main() -> None:
     if not client_id or not client_secret:
         raise SystemExit("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are required")
 
-    if not args.tracking_state and (args.trigger_source != "manual" or os.environ.get("GITHUB_RUN_ID")):
+    production = args.trigger_source != "manual" or os.environ.get("GITHUB_RUN_ID")
+    if not args.tracking_state and production:
         raise SystemExit("--tracking-state is required for production collection; refusing to reset enrollments")
+    if production and (not args.steam_catalog or not args.steam_mapping):
+        raise SystemExit("--steam-catalog and --steam-mapping are required for production collection")
+    if args.steam_mapping and not args.steam_catalog:
+        raise SystemExit("--steam-mapping requires --steam-catalog")
     tracking_state = (validate_persisted_tracking(json.loads(Path(args.tracking_state).read_text(encoding="utf-8")))
                       if args.tracking_state else None)
+    steam_catalog = json.loads(Path(args.steam_catalog).read_text(encoding="utf-8")) if args.steam_catalog else None
+    if steam_catalog is not None:
+        normalize_steam_catalog(steam_catalog, datetime.now(timezone.utc))
+    steam_mapping = None
+    if args.steam_mapping:
+        persisted_mapping = json.loads(Path(args.steam_mapping).read_text(encoding="utf-8"))
+        steam_mapping = validate_persisted_mapping(persisted_mapping)
 
     payload = collect_twitch(
         client_id=client_id,
@@ -72,6 +88,8 @@ def main() -> None:
         followers_max_calls=args.followers_max_calls,
         followers_max_seconds=args.followers_max_seconds,
         tracking_state=tracking_state,
+        steam_catalog=steam_catalog,
+        steam_mapping_state=steam_mapping,
     )
     if args.target_slot:
         payload["collection_schedule"] = {
@@ -91,6 +109,9 @@ def main() -> None:
     )
     print(f"Persistent new-game observation: {len(payload.get('tracked_games', []))} active games; "
           "the 7,000-viewer threshold applies only to initial enrollment.")
+    steam_summary = payload.get("steam_catalog_summary", {})
+    if steam_summary:
+        print(f"Steam/Twitch mapping: {json.dumps(steam_summary, ensure_ascii=False)}")
     print(f"Twitch {twitch_trial['window_days']}-day trial: {twitch_trial['evaluated_candidates']} evaluated / "
           f"{twitch_trial['unknown_candidates']} unknown; IGDB {igdb_trial['window_days']}-day filter: "
           f"{igdb_trial['evaluated_candidates']} evaluated candidates / "
@@ -129,7 +150,7 @@ def main() -> None:
                 f"- IGDB 預先查詢：{payload['coverage']['igdb_categories_evaluated']} 類可判定、{payload['coverage']['igdb_categories_unknown']} 類未知\n"
                 f"- 與先前官方標記對照：{len(experiment['reference_checks'])} 筆來源／遊戲組合；詳見 JSON，回溯對照不代表官方規則驗證通過\n\n"
                 "Glance 的判斷為日期差 < 14 天，包含未來日期；滿 14 天即不符合。\n"
-                "IGDB 改為日期差 < 30 天，包含未來日期；滿 30 天即停止該遊戲本輪直播與追隨查詢，保留既有歷史。\n"
+                "IGDB 日期差 < 30 天用於 Twitch 新作來源；Steam 近期上市來源依 Steam 台灣日期獨立判定，任一來源有效即持續收集。\n"
                 "缺少 Twitch 原始日期時保持未知；IGDB 結果分開顯示，不補成 Twitch 原始日期。\n"
             )
             if audience:
@@ -145,6 +166,11 @@ def main() -> None:
                     "合格樣本為零時中位數也是空值；未知與空樣本皆不填 0。\n"
                     "舊歷史不倒填、不以原始中位數冒充新指標。\n"
                 )
+            if steam_summary:
+                summary.write("\n### Steam / Twitch 對照與近期上市\n\n")
+                summary.write("Steam 上市未滿 30 天的已配對遊戲不受 7,000 人收錄門檻限制；"
+                              "Twitch 熱門新作維持獨立來源。圖片沿用 Twitch。\n\n")
+                summary.write("```json\n" + json.dumps(steam_summary, ensure_ascii=False, indent=2) + "\n```\n")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Game Trend Radar — Twitch 獨立後端
 
-找出總觀眾數達 **7,000 人**且有新作線索的遊戲，收錄後持續追蹤到發售滿 **30 天**。7,000 人只用於首次收錄，之後跌破門檻、退出熱門排行或沒人直播都不會移除。紀錄總觀眾數、開台實況主人數及**每台觀眾數的中位數**，並獨立管理 Twitch「全新」標記的驗證狀態。顯示用的**篩選中位數**只納入免費追隨者 **> 1,000**、且當次觀眾 **≥ 10** 的直播台。
+保留總觀眾數達 **7,000 人**且有新作線索的 Twitch 遊戲，同時加入既有 Steam 公開清單中**已上市未滿 30 天**、能確認對應 Twitch 類別的遊戲。Steam 近期上市入口不套用 7,000 人門檻；沒有 Steam 商品的主機、手機等 Twitch 新作仍獨立觀測。每小時依 Twitch 類別 ID 收集，重疊來源只查一次，圖片沿用 Twitch 封面。紀錄總觀眾數、開台實況主人數及**每台觀眾數的中位數**，並獨立管理 Twitch「全新」標記的驗證狀態。顯示用的**篩選中位數**只納入免費追隨者 **> 1,000**、且當次觀眾 **≥ 10** 的直播台。
 
 ## 執行狀態
 
@@ -10,7 +10,7 @@
 
 **Cloudflare 設定於每小時 05 分觸發，GitHub Actions 於 17 分備援**（台灣時間，例如 11:05 與 11:17）。兩者的 cron 分別為 `5 * * * *` 與 `17 * * * *`；UTC 與台灣分鐘相同，不需另外平移小時。備援仍會檢查本小時回條，已發布就略過收集。排程可能延遲，因此資料保存實際收集與量測時間，不將延遲結果標成準點觀測。設定已提交不等於排程已觸發，實際狀態須看 Actions 的 `cloudflare` 名稱或 `schedule` 執行紀錄，不能以手動成功代替。
 
-仍可到 Actions → Collect Twitch live data → Run workflow 手動執行。同一時間只允許一個收集／發布工作，不取消正在執行的工作；沒有 push 或 workflow_run 收集觸發器。Test standalone collector 的 push CI 只跑離線測試，不查 API、不發布資料。
+仍可到 Actions → Collect Twitch live data → Run workflow 手動執行。同一時間只允許一個收集／發布工作，不取消正在執行的工作。Steam 對應模組更新的 push 會啟動一次部署驗證收集；此入口與每小時排程使用同一份 workflow、concurrency 與發布回條，不是額外的週期排程。Test standalone collector 的一般 push CI 只跑離線測試，不查 API、不發布資料。
 
 舊版收集器已成功連線及發布；這不代表新版候選流程已通過實際 API 測試。2026-09-29 01:08（台灣）啟動的新版收集在 Helix 呼叫預算耗盡後中止，沒有發布。當時第 2～4 頁各有 99 個新量測分類且皆低於門檻，但跨頁重複分類使停止條件一直不成立。本版改為重新量測重複分類，再判斷門檻，不增加 API 呼叫預算。每次執行會在 Actions Summary 顯示候選數、待驗證數、日期實驗及 Helix 呼叫次數。
 
@@ -27,11 +27,19 @@
 
 ### 持續追蹤與歷史補回
 
-`data/twitch_tracking.json`（前端儲存庫）保存首次收錄、收錄依據、最後觀測、已知發售日期與退出時間。首次收錄須同時達觀眾門檻及有新作證據：有效官方全新觀測、Twitch 日期推算命中或 IGDB 30 天命中；只有人氣、沒有新作證據的未知候選不會自動加入。
+`data/twitch_tracking.json`（前端儲存庫）保存首次收錄、收錄依據、最後觀測與各來源期限。Twitch 熱門新作入口須同時達觀眾門檻及有新作證據：有效官方全新觀測、Twitch 日期推算命中或 IGDB 30 天命中；只有人氣、沒有新作證據的未知候選不會自動加入。Steam 入口使用既有公開清單、確認的 ID 對照與 Steam 該版本上市日，上市後未滿 30 天即加入，不受 Twitch 觀眾門檻或 IGDB 全球首發日期影響。
+
+每款類別的 `tracking_sources` 分別保存 `twitch_new` 與 `steam:<appid>`，任一來源有效便保留觀測。Twitch 來源沿用其發售資料；Steam 來源優先採 Steam 已保存的 UTC 精確時間，依台灣上市日核對，缺少精確時間時採確切台灣日期的零時。尚未上市、日期模糊或衝突的 Steam 項目不加入近期上市觀測。來源到期後保留紀錄，不刪除歷史。
+
+### Steam 與 Twitch 對照
+
+從 Steam AppID 查 IGDB `external_games` 的 Steam 外部 ID，再以 IGDB game ID 批次查 Helix `Get Games`，得到 Twitch 類別 ID。Steam 外部來源 ID 由 `external_game_sources` 查詢，不沿用已棄用的 `category` 寫法。匹配成功的 ID 快取；未找到或多個候選分別保存待配對狀態，按重試期限補查，不將名稱相似當作確認配對。
+
+`data/twitch_steam_mapping.json` 保存 ID 對照、配對依據與 Steam 補充資訊。名稱、TAG、關注度、Steam 商店連結及上市資訊可補充至 Twitch 觀測；圖片始終使用 Twitch `box_art_url`。尚未找到 Twitch 類別的 Steam 遊戲保持待配對，未量測人數為空值。Twitch 類別數據涵蓋該類別的直播，不表示每位主播使用 Steam 版；對應也不代表已確認官方「全新」標記。
 
 收錄後保留至 `release_at + 30 × 24 小時`。未知日期不以首次收錄日代替發售日，保留追蹤待確認；暫時無法查日期時沿用已確認的發售日判斷退出。非遊戲分類仍排除。只有直播分頁完整且實際查無開台時，當輪總觀眾與開台數才記 0；查詢失敗或未量測時保留缺測。
 
-排程收集前先下載前端最新不可變 Git 版本的追蹤名單。檔案缺少、讀取失敗或格式損毀時停止收集，不用空名單覆蓋既有收錄。追蹤狀態與 latest、逐時歷史及成功紀錄一同發布；遇到並行更新保留較新的狀態及最早的收錄依據。
+排程收集前先下載前端同一個不可變 Git 版本的追蹤名單、Steam 公開清單及 ID 對照。追蹤名單或 Steam 清單缺少、讀取失敗或格式損毀時停止收集，不用空資料覆蓋既有收錄；ID 對照在首次部署可尚未存在，已存在而損毀則停止。追蹤狀態、對照、latest、逐時歷史及成功紀錄一同發布；遇到並行更新保留來源聯集、較新的狀態及最早的收錄依據。
 
 歷史補回使用已保存的人數與日期證據重播首次收錄條件；舊 IGDB 14 天快照可依原始日期補算 30 天資格，但不改寫舊快照的命中結果、原始量測時間或逐時數值。前端將尚未重新量測的恢復項目標示為上次觀測，不混入目前總數。
 
@@ -60,7 +68,7 @@ Twitch 原始日期實驗保留上述 14 天條件。IGDB 另改為 `評估時�
 | `twitch_original_release_date` | Twitch 的 `originalReleaseDate` | 目前缺資料；需有來源、擷取時間的既有回應或第三方資料集匯出 |
 | `igdb_first_release_date` | 官方 IGDB API 的 `first_release_date` | 沿用現有 Twitch 憑證批次查詢，獨立的 30 天推算及收集篩選，不補成 Twitch 原始日期 |
 
-`predicted_new` 為 `true` / `false` / `null`；缺資料、日期不合法、擷取時間在未來，或資料擷取超過 24 小時，都回傳未知 `null`。所有推算都標記 `confirms_twitch_new_badge: false`，不改寫 `verification`。IGDB 的有效 `false` 會將分類列入 `excluded_games`，原因為 `igdb_release_outside_window`，附上日期證據、30 天窗口與完整推算。因為已略過直播查詢，其 `metrics_collected` 為 `false`、`viewer_threshold_met` 為 `null`，不能稱它已達 7,000 人，也不將未量測人數填 0。`top_games` 僅包含仍在收集範圍且達觀眾門檻、官方觀察為 `new` 的候選。
+`predicted_new` 為 `true` / `false` / `null`；缺資料、日期不合法、擷取時間在未來，或資料擷取超過 24 小時，都回傳未知 `null`。所有推算都標記 `confirms_twitch_new_badge: false`，不改寫 `verification`。未由有效追蹤來源保留的分類，IGDB 有效 `false` 會將其列入 `excluded_games`，原因為 `igdb_release_outside_window`，附上日期證據、30 天窗口與完整推算。因為已略過直播查詢，其 `metrics_collected` 為 `false`、`viewer_threshold_met` 為 `null`，不能稱它已達 7,000 人，也不將未量測人數填 0。有效 Steam 來源不因 IGDB 全球首發日期較早而停止收集。`top_games` 僅包含仍在收集範圍且達觀眾門檻、官方觀察為 `new` 的候選。
 
 `newness_experiment` 列出每種來源可判定／未知的候選數及排除項數、推算 NEW 的遊戲 ID、尚未上市 ID，以及與有效官方觀察的 `reference_checks`。對照使用**官方標記當時**的時間及該來源窗口計算；若日期資料是在較晚時間取得，會標示 `retrospective`，不能解讀成官方規則已驗證。IGDB 與 Twitch 日期的對照分開計數，不能把兩個來源當成兩款遊戲。`coverage.excluded_by_igdb_date_count` 紀錄本輪因日期未命中而跳過量測的分類數；`igdb_categories_evaluated`／`igdb_categories_unknown` 包含已查日期但最後未達觀眾門檻的分類。
 
@@ -122,6 +130,7 @@ Helix 的直播語言不等於主播所在地。目前提供 `language_streamers
 |---|---|
 | `data/twitch_live.json` | 最新 schema v2 候選、驗證狀態與收集範圍 |
 | `data/twitch_tracking.json` | 持續追蹤狀態、首次收錄依據與最後觀測；退出後仍保留紀錄 |
+| `data/twitch_steam_mapping.json` | Steam／IGDB／Twitch ID 對照、Steam 補充資訊與待配對狀態 |
 | `data/twitch_history/YYYY-MM-DD.json` | 以台灣日期分檔、以 UTC 小時為索引的人數歷史 |
 | `data/twitch_collection_status.json` | 與 latest/history 同 commit 發布的小型成功紀錄，供外部監控及防重複檢查 |
 
@@ -165,6 +174,16 @@ python -m pytest -q
 python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.json
 ```
 
+上例為獨立診斷，不帶已發布名單。要測試完整持續追蹤與 Steam 對照，先載入同一版本的輸入：
+
+```bash
+python -m scripts.load_twitch_tracking
+python -m scripts.update_twitch --tracking-state output/twitch_tracking_input.json \
+  --steam-catalog output/steam_catalog_input.json \
+  --steam-mapping output/twitch_steam_mapping_input.json \
+  --output output/twitch_live.json
+```
+
 | 參數 | 預設 | 用途 |
 |---|---|---|
 | `--min-viewers` | `7000` | 候選總觀眾數門檻，包含恰好達標 |
@@ -174,6 +193,8 @@ python -m scripts.update_twitch --min-viewers 7000 --output output/twitch_live.j
 | `--max-collection-seconds` | `1500` | 整輪收集共用軟期限，預留工作保存／發布時間 |
 | `--verification-registry` | 專案的驗證 JSON | 直接觀察紀錄檔 |
 | `--tracking-state` | 未指定為獨立首次探索 | 持續追蹤名單 JSON；正式排程必須先取得已發布的狀態 |
+| `--steam-catalog` | 未指定 | 與名單同版本的公開 Steam 清單；正式排程必填 |
+| `--steam-mapping` | 未指定 | 與名單同版本的 ID 對照；首次部署為空表，正式排程必填 |
 | `--release-dates` | `data/twitch_release_dates.json` | 有來源與擷取時間的 Twitch 原始發售日期匯入檔 |
 | `--no-release-hints` | 不啟用 | 加上此旗標即可略過 IGDB 及其 30 天收集篩選 |
 | `--followers-cache` | `.cache/twitch_followers.json` | 追隨總數 24 小時快取，只保存在 runner／Actions cache |

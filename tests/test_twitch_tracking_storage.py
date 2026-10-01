@@ -45,7 +45,9 @@ def test_enrolled_below_threshold_and_genuine_empty_census_are_saved(tmp_path, m
     assert len(saved) == 1
     assert (saved[0]["viewer_count"], saved[0]["streamer_count"], saved[0]["median_viewer_count"]) == metrics
     assert saved[0]["observation_status"] == "current"
-    assert json.loads((tmp_path / "data/twitch_tracking.json").read_text()) == payload["tracking_state"]
+    saved_tracking = json.loads((tmp_path / "data/twitch_tracking.json").read_text())
+    assert saved_tracking == loader.validate_persisted_tracking(payload["tracking_state"])
+    assert saved_tracking["games"]["1"]["tracking_sources"]["twitch_new"]["enrollment"] == payload["tracking_state"]["games"]["1"]["enrollment"]
     assert (tmp_path / "data/twitch_collection_status.json").exists()
 
 
@@ -145,7 +147,7 @@ def test_registry_loader_pins_frontend_head_without_credentials(monkeypatch):
         return io.BytesIO(json.dumps(tracking_state()).encode())
 
     monkeypatch.setattr(loader, "urlopen", fetch)
-    assert loader.load_published_tracking() == tracking_state()
+    assert loader.load_published_tracking() == loader.validate_persisted_tracking(tracking_state())
     assert urls == [f"https://raw.githubusercontent.com/{loader.FRONTEND}/{sha}/data/twitch_tracking.json"]
 
 

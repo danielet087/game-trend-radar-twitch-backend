@@ -25,7 +25,7 @@ from collectors.twitch_newness import (
     load_release_dates, parse_timestamp, timestamp,
 )
 from collectors.twitch_tracking import (
-    enroll_observation, normalize_tracking_state, reconcile_tracking_entry,
+    enroll_observation, normalize_tracking_state, reconcile_tracking_entry, reconcile_steam_catalog,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -216,6 +216,7 @@ def collect_candidates(
     max_collection_seconds: float = 1500,
     monotonic: Callable[[], float] = time.monotonic,
     tracking_state: dict | None = None,
+    steam_catalog: dict | None = None, steam_mapping_state: dict | None = None,
 ) -> dict[str, Any]:
     collection_started = monotonic()
     if not math.isfinite(max_collection_seconds) or max_collection_seconds <= 0:
@@ -231,6 +232,25 @@ def collect_candidates(
     if isinstance(client, TwitchClient):
         client.collection_deadline, client.monotonic = deadline, monotonic
     reader = PageReader(client, max_api_calls, deadline=deadline, monotonic=monotonic)
+    from collectors.steam_twitch_mapping import normalize_mapping_state, normalize_steam_catalog, refresh_mappings
+    mappings = normalize_mapping_state(steam_mapping_state)
+    steam_summary = {"status": "not_supplied", "catalog_games": None, "recent_releases": None}
+    steam_matches_by_id = None
+    if steam_catalog is not None:
+        catalog = normalize_steam_catalog(steam_catalog, clock)
+        mappings = refresh_mappings(client, steam_catalog, mappings, clock, deadline=deadline, monotonic=monotonic)
+        reconcile_steam_catalog(tracking, catalog, mappings, clock, non_game_ids=NON_GAME_IDS)
+        steam_by_appid = {steam["steam_appid"]: steam for steam in catalog}
+        steam_matches_by_id = {}
+        for appid, mapping in mappings["games"].items():
+            if mapping.get("status") == "matched" and appid in steam_by_appid:
+                steam_matches_by_id.setdefault(str(mapping["twitch_game_id"]), []).append(steam_by_appid[appid])
+        steam_summary = {
+            "status": "ok", "catalog_games": len(catalog),
+            "recent_releases": sum(bool(steam.get("is_recent")) for steam in catalog),
+            "matched_games": sum(row.get("status") == "matched" for row in mappings["games"].values()),
+            "mapping_report": mappings.get("report"),
+        }
     candidates_by_id, excluded_by_id = {}, {}
     retained_by_id = {}
     channels_by_game: dict[str, list[dict]] = {}
@@ -297,6 +317,10 @@ def collect_candidates(
             page_seen.add(game_id)
             previously_seen = game_id in seen_ids
             seen_ids.add(game_id)
+            if previously_seen:
+                # Ranking can repeat across pages. A confirmed ID has one
+                # census per run, shared by every admission source.
+                continue
             verification = verification_for(game_id, observations, now or datetime.now(timezone.utc))
             hint = hints.get(str(game.get("igdb_id")), {})
             prediction = evaluate_date(hint.get("first_release_date"), hint.get("checked_at"), hints_clock,
@@ -316,7 +340,7 @@ def collect_candidates(
                     "verification": verification, "metrics_collected": False, "viewer_threshold_met": None,
                 }
                 continue
-            if (prediction["status"] == "evaluated" and prediction["predicted_new"] is False
+            if not already_tracking and (prediction["status"] == "evaluated" and prediction["predicted_new"] is False
                     or tracked_entry is not None and tracked_entry["status"] != "active"):
                 candidates_by_id.pop(game_id, None)
                 channels_by_game.pop(game_id, None)
@@ -332,8 +356,7 @@ def collect_candidates(
                 }
                 continue
             excluded_by_id.pop(game_id, None)
-            # Re-measure cross-page duplicates. Merely seeing one duplicate must
-            # not disable threshold termination on every subsequent page.
+            # One census per ID also serves both Twitch and Steam membership.
             metrics = category_metrics(reader, game_id, max_stream_pages, retain_channels=include_filtered_audience)
             channels = metrics.pop("_channels", None)
             measured_count += 1
@@ -358,9 +381,9 @@ def collect_candidates(
                 continue
             page_qualified += 1
             below_ids.discard(game_id)
-            if verification["status"] == "not_new":
-                # A vanished badge cannot evict an existing enrollment, but
-                # this row no longer belongs to new-admission discovery.
+            if verification["status"] == "not_new" or (prediction["status"] == "evaluated" and prediction["predicted_new"] is False):
+                # Steam keeps old global releases observable but never turns
+                # them into Twitch new-admission discovery candidates.
                 candidates_by_id.pop(game_id, None)
                 continue
             candidates_by_id[game_id] = row
@@ -454,10 +477,15 @@ def collect_candidates(
         follower_coverage = attach_filtered_audience(list(measured_rows.values()), channels_by_game, resolver)
         finished = now or datetime.now(timezone.utc)
     for row in measured_rows.values():
+        if steam_matches_by_id is not None:
+            row["steam_matches"] = steam_matches_by_id.get(row["game_id"], [])
         # Preserve the exact pre-census date decision at a 30-day boundary.
-        decision_at = igdb_predictions.get(row["game_id"], {}).get("evaluated_at")
+        prediction = igdb_predictions.get(row["game_id"], {})
+        decision_at = prediction.get("evaluated_at")
         enroll_observation(tracking, row, finished, min_viewers=min_viewers, non_game_ids=NON_GAME_IDS,
-                           eligibility_at=parse_timestamp(decision_at) if decision_at else clock)
+                           eligibility_at=parse_timestamp(decision_at) if decision_at else clock,
+                           allow_twitch_enrollment=not (prediction.get("status") == "evaluated"
+                                                        and prediction.get("predicted_new") is False))
     tracking["updated_at"] = timestamp(finished)
     tracked = [row for row in measured_rows.values()
                if tracking["games"].get(row["game_id"], {}).get("status") == "active"]
@@ -489,7 +517,7 @@ def collect_candidates(
             "igdb_hints_status": hints_status,
             "tracked_active_count": len(tracked),
             "tracked_outside_discovery_count": sum(row["game_id"] not in candidates_by_id for row in tracked),
-            "tracking_note": "The viewer threshold admits new games. Active enrollments remain monitored until 30 days after their known release; directory absence and badge disappearance do not remove them.",
+            "tracking_note": "Twitch new-game discovery and Steam releases within 30 days independently admit categories. Active source memberships are unioned by Twitch ID and measured once; directory absence, viewer decline and badge disappearance do not remove active memberships.",
         },
         "candidate_games": candidates,
         "top_games": [r for r in candidates if r["verification"]["status"] == "new"],
@@ -498,4 +526,5 @@ def collect_candidates(
         "newness_experiment": experiment,
         "tracked_games": tracked,
         "tracking_state": tracking,
+        "steam_mapping_state": mappings, "steam_catalog_summary": steam_summary,
     }

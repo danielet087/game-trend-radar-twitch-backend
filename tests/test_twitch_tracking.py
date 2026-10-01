@@ -81,6 +81,7 @@ def test_unknown_release_stays_active_until_date_can_be_resolved(tmp_path):
     state = initial_state()
     entry = state["games"]["1"]
     entry.update(release_at=None, expires_at=None, release_source=None)
+    entry["tracking_sources"]["twitch_new"].update(release_at=None, expires_at=None, release_source=None)
     entry["last_observation"].pop("release_evidence")
     client = FakeClient([("games/top", page([])), ("games", page([])), ("streams", page([]))])
     result = run(tmp_path, client, state)

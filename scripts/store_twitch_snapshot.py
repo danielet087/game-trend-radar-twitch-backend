@@ -11,11 +11,39 @@ from pathlib import Path
 from collectors.twitch_candidates import parse_timestamp, timestamp
 from collectors.twitch_live import write_json
 from collectors.twitch_tracking import normalize_tracking_state
-from scripts.load_twitch_tracking import validate_persisted_tracking
+from scripts.load_twitch_tracking import validate_persisted_mapping, validate_persisted_tracking
 
 TAIPEI = timezone(timedelta(hours=8))
 STATUS_PATH = "data/twitch_collection_status.json"
 TRACKING_PATH = "data/twitch_tracking.json"
+MAPPING_PATH = "data/twitch_steam_mapping.json"
+
+
+def merge_mapping_state(existing: dict | None, incoming: dict) -> dict:
+    """Keep all AppID mappings while protecting newer mapping decisions."""
+    new = validate_persisted_mapping(incoming)
+    if existing is None:
+        return new
+    old = validate_persisted_mapping(existing)
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    clock = lambda state: parse_timestamp(state["updated_at"]) if state.get("updated_at") else floor
+    result = deepcopy(new if clock(new) >= clock(old) else old)
+    result["games"] = {}
+    for appid in sorted(set(old["games"]) | set(new["games"])):
+        previous, current = old["games"].get(appid), new["games"].get(appid)
+        if previous is None or current is None:
+            result["games"][appid] = deepcopy(current if previous is None else previous)
+            continue
+        entry_clock = lambda entry, state: (parse_timestamp(entry["checked_at"]) if entry.get("checked_at") else clock(state), clock(state))
+        merged = deepcopy(current if entry_clock(current, new) >= entry_clock(previous, old) else previous)
+        # Identity confirmations can remain cached while the Steam store date,
+        # labels or followers change. Their metadata has a separate clock.
+        metadata_clock = lambda entry, state: parse_timestamp(entry["metadata_updated_at"]) if entry.get("metadata_updated_at") else clock(state)
+        metadata = current if metadata_clock(current, new) >= metadata_clock(previous, old) else previous
+        merged["steam"] = deepcopy(metadata["steam"])
+        merged["metadata_updated_at"] = timestamp(metadata_clock(metadata, new if metadata is current else old))
+        result["games"][appid] = merged
+    return validate_persisted_mapping(result)
 
 
 def merge_tracking_state(existing: dict | None, incoming: dict) -> dict:
@@ -37,9 +65,30 @@ def merge_tracking_state(existing: dict | None, incoming: dict) -> dict:
         if previous is None or current is None:
             result["games"][game_id] = deepcopy(current if previous is None else previous)
             continue
-        old_updated = parse_timestamp(previous.get("updated_at", old["updated_at"]))
-        new_updated = parse_timestamp(current.get("updated_at", new["updated_at"]))
+        old_updated = parse_timestamp(previous.get("updated_at") or old["updated_at"])
+        new_updated = parse_timestamp(current.get("updated_at") or new["updated_at"])
         merged = deepcopy(current if new_updated >= old_updated else previous)
+        # Source membership is independent: a Steam addition and a Twitch
+        # update to the same ID must both survive publication races.
+        source_states = {}
+        for source_key in set(previous.get("tracking_sources", {})) | set(current.get("tracking_sources", {})):
+            old_source = previous.get("tracking_sources", {}).get(source_key)
+            new_source = current.get("tracking_sources", {}).get(source_key)
+            if old_source is None or new_source is None:
+                source = deepcopy(new_source if old_source is None else old_source)
+            else:
+                source_clock = lambda value, fallback: parse_timestamp(value.get("updated_at") or timestamp(fallback))
+                source = deepcopy(new_source if source_clock(new_source, new_updated) >= source_clock(old_source, old_updated) else old_source)
+                values = [value["first_seen_at"] for value in (old_source, new_source) if value.get("first_seen_at")]
+                if values:
+                    source["first_seen_at"] = min(values, key=parse_timestamp)
+                enrollments = [value["enrollment"] for value in (old_source, new_source)
+                               if isinstance(value.get("enrollment"), dict) and value["enrollment"].get("observed_at")]
+                if enrollments:
+                    source["enrollment"] = deepcopy(min(enrollments, key=lambda item: parse_timestamp(item["observed_at"])))
+            source_states[source_key] = source
+        if source_states:
+            merged["tracking_sources"] = source_states
         # Enrollment is historical evidence and may have been recovered while
         # this job was running. Keep the earliest evidence rather than resetting
         # first_seen_at to the next time that viewers cross the discovery bar.
@@ -164,6 +213,8 @@ def validate_snapshot(payload: dict) -> None:
     if not isinstance(tracked, list):
         raise ValueError("Invalid tracked game list")
     tracking = validate_persisted_tracking(payload["tracking_state"]) if "tracking_state" in payload else None
+    if "steam_mapping_state" in payload:
+        validate_persisted_mapping(payload["steam_mapping_state"])
     if tracked and tracking is None:
         raise ValueError("Tracked observations require their persistent registry")
     for row in tracked:
@@ -227,6 +278,12 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
         validate_persisted_tracking(tracking)
     merged_tracking = (merge_tracking_state(tracking, payload["tracking_state"])
                        if "tracking_state" in payload else tracking)
+    mapping_path = frontend / MAPPING_PATH
+    mapping = json.loads(mapping_path.read_text(encoding="utf-8")) if mapping_path.exists() else None
+    if mapping_path.exists():
+        validate_persisted_mapping(mapping)
+    merged_mapping = (merge_mapping_state(mapping, payload["steam_mapping_state"])
+                      if "steam_mapping_state" in payload else mapping)
     order = observation_order(payload)
     update_latest = latest is None or order > observation_order(latest)
     # Receipt and latest must describe the same result. A stale publication may
@@ -245,7 +302,7 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
                 {**{key: row[key] for key in (
                     "game_id", "game_name", "viewer_count", "streamer_count", "median_viewer_count",
                     "measurement_started_at", "measurement_finished_at", "verification",
-                )}, **{key: row[key] for key in ("release_experiment", "filtered_audience", "tracking",
+                )}, **{key: row[key] for key in ("release_experiment", "filtered_audience", "tracking", "steam_matches",
                                                 "observation_status", "observation_at") if key in row}}
                 for row in observed_rows(payload)
             ],
@@ -256,12 +313,16 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
         latest_payload = deepcopy(payload)
         if merged_tracking is not None and "tracking_state" in payload:
             latest_payload["tracking_state"] = merged_tracking
+        if merged_mapping is not None and "steam_mapping_state" in payload:
+            latest_payload["steam_mapping_state"] = merged_mapping
         write_json(latest_payload, latest_path)
     if merged_tracking is not None and merged_tracking != tracking:
         write_json(merged_tracking, tracking_path)
+    if merged_mapping is not None and merged_mapping != mapping:
+        write_json(merged_mapping, mapping_path)
     same_observation = (latest is not None and
-                        {key: value for key, value in latest.items() if key != "tracking_state"} ==
-                        {key: value for key, value in payload.items() if key != "tracking_state"})
+                        {key: value for key, value in latest.items() if key not in {"tracking_state", "steam_mapping_state"}} ==
+                        {key: value for key, value in payload.items() if key not in {"tracking_state", "steam_mapping_state"}})
     if scheduled and (update_latest or same_observation) and (status_order is None or order >= status_order):
         receipt = {
             "schema_version": 1,

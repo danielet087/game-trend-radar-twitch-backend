@@ -5,6 +5,12 @@ run-name: "Collect Twitch | slot=${{ inputs.target_slot || 'automatic' }} | ${{ 
 # GitHub may delay scheduled starts; saved data keeps actual measurement times.
 # CI tests run separately and do not call the live API.
 on:
+  # Bootstrap a mapping-module deployment once using the regular collection
+  # pipeline; data-only commits never trigger this path.
+  push:
+    branches: [main]
+    paths:
+      - 'collectors/steam_twitch_mapping.py'
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
@@ -74,11 +80,11 @@ jobs:
         env:
           TARGET_SLOT: ${{ inputs.target_slot }}
           TRIGGER_SOURCE: ${{ inputs.trigger_source || 'manual' }}
-          FORCE_COLLECTION: ${{ inputs.force || false }}
+          FORCE_COLLECTION: ${{ inputs.force || github.event_name == 'push' || false }}
         run: python -m scripts.collection_guard
-      - name: Load persistent observation list
+      - name: Load consistent observation list and Steam mapping inputs
         if: steps.guard.outputs.should_collect == 'true'
-        run: python -m scripts.load_twitch_tracking --output output/twitch_tracking_input.json
+        run: python -m scripts.load_twitch_tracking --output output/twitch_tracking_input.json --steam-output output/steam_catalog_input.json --mapping-output output/twitch_steam_mapping_input.json
       - name: Restore daily follower counts
         if: steps.guard.outputs.should_collect == 'true'
         continue-on-error: true
@@ -97,7 +103,7 @@ jobs:
           TRIGGER_SOURCE: ${{ steps.guard.outputs.trigger_source }}
         # One 25-minute collection deadline, leaving time inside the 30-minute
         # job for setup, cache save and publication. No separate follower cap.
-        run: python -m scripts.update_twitch --min-viewers 7000 --max-collection-seconds 1500 --target-slot "$TARGET_SLOT" --trigger-source "$TRIGGER_SOURCE" --tracking-state output/twitch_tracking_input.json --output output/twitch_live.json
+        run: python -m scripts.update_twitch --min-viewers 7000 --max-collection-seconds 1500 --target-slot "$TARGET_SLOT" --trigger-source "$TRIGGER_SOURCE" --tracking-state output/twitch_tracking_input.json --steam-catalog output/steam_catalog_input.json --steam-mapping output/twitch_steam_mapping_input.json --output output/twitch_live.json
       - name: Save follower lookup progress
         if: always() && steps.guard.outputs.should_collect == 'true' && hashFiles('.cache/twitch_followers.json') != ''
         continue-on-error: true

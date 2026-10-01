@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Merge Twitch latest/history, durable tracking and receipt in one commit.
+# Merge Twitch latest/history, durable tracking, Steam mapping and receipt in one commit.
 set -euo pipefail
 source_file="$(realpath "${1:-output/twitch_live.json}")"
 test -s "$source_file"
@@ -26,6 +26,9 @@ for attempt in 1 2 3 4 5; do
   fi
   if [[ -f "$work_dir/frontend/data/twitch_tracking.json" ]]; then
     git -C "$work_dir/frontend" add -- data/twitch_tracking.json
+  fi
+  if [[ -f "$work_dir/frontend/data/twitch_steam_mapping.json" ]]; then
+    git -C "$work_dir/frontend" add -- data/twitch_steam_mapping.json
   fi
   if git -C "$work_dir/frontend" diff --cached --quiet; then
     echo 'twitch data is already up to date.'
