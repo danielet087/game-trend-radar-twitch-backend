@@ -89,6 +89,7 @@ def test_catalog_uses_exact_utc_release_preserves_only_compact_store_metadata():
     assert source == before
     assert row["release_at"] == "2026-09-20T15:00:00Z"
     assert row["expires_at"] == "2026-10-20T15:00:00Z"
+    assert row["release_precision"] == "day" and row["release_time_basis"] == "exact_utc"
     assert row["is_recent"] is True
     assert row["display_name"] == "守墓人 2"
     assert row["tags"] == ["Adventure"] and row["tag_labels_zh_tw"] == {"Adventure": "冒險"}
@@ -100,6 +101,7 @@ def test_taipei_day_only_and_release_instant_boundaries():
     assert normalize_steam_catalog(catalog(row), NOW)[0]["is_recent"] is False
     entry = normalize_steam_catalog(catalog(row), datetime(2026, 10, 1, 16, tzinfo=timezone.utc))[0]
     assert entry["release_at"] == "2026-10-01T16:00:00Z" and entry["is_recent"] is True
+    assert entry["release_precision"] == "day" and entry["release_time_basis"] == "taipei_date_midnight"
     release = datetime(2026, 9, 20, 15, tzinfo=timezone.utc)
     assert normalize_steam_catalog(catalog(), release - timedelta(seconds=1))[0]["is_recent"] is False
     assert normalize_steam_catalog(catalog(), release)[0]["is_recent"] is True

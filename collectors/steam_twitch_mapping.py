@@ -135,6 +135,8 @@ def normalize_steam_catalog(payload: dict, now: datetime) -> list[dict]:
             "steam_appid": appid, "name": name.strip(), "display_name": display.strip(), "name_en": english.strip(),
             "store_url": f"https://store.steampowered.com/app/{appid}/", "followers": followers,
             "release_at": timestamp(release), "release_date": start, "release_date_timezone": "Asia/Taipei",
+            "release_precision": "day",
+            "release_time_basis": "exact_utc" if row.get("release_time_utc") else "taipei_date_midnight",
             "is_recent": release <= clock < expires, "expires_at": timestamp(expires),
             "tags": tags, "genres": genres,
             "tag_labels_zh_tw": _labels(row.get("tag_labels_zh_tw"), tags),

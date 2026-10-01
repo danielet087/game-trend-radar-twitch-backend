@@ -29,7 +29,7 @@
 
 `data/twitch_tracking.json`（前端儲存庫）保存首次收錄、收錄依據、最後觀測與各來源期限。Twitch 熱門新作入口須同時達觀眾門檻及有新作證據：有效官方全新觀測、Twitch 日期推算命中或 IGDB 30 天命中；只有人氣、沒有新作證據的未知候選不會自動加入。Steam 入口使用既有公開清單、確認的 ID 對照與 Steam 該版本上市日，上市後未滿 30 天即加入，不受 Twitch 觀眾門檻或 IGDB 全球首發日期影響。
 
-每款類別的 `tracking_sources` 分別保存 `twitch_new` 與 `steam:<appid>`，任一來源有效便保留觀測。Twitch 來源沿用其發售資料；Steam 來源優先採 Steam 已保存的 UTC 精確時間，依台灣上市日核對，缺少精確時間時採確切台灣日期的零時。尚未上市、日期模糊或衝突的 Steam 項目不加入近期上市觀測。來源到期後保留紀錄，不刪除歷史。
+每款類別的 `tracking_sources` 分別保存 `twitch_new` 與 `steam:<appid>`，任一來源有效便保留觀測。Twitch 來源沿用其發售資料；Steam 來源優先採 Steam 已保存的 UTC 精確時間，依台灣上市日核對，缺少精確時間時採確切台灣日期的零時。Steam 補充資訊的 `release_time_basis` 分別標示 `exact_utc` 或 `taipei_date_midnight`，避免將日期備援解讀成精確發售時刻。尚未上市、日期模糊或衝突的 Steam 項目不加入近期上市觀測。來源到期後保留紀錄，不刪除歷史。
 
 ### Steam 與 Twitch 對照
 

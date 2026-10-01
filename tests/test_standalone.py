@@ -130,6 +130,9 @@ def test_cli_passes_persisted_registry_to_collector(tmp_path, monkeypatch):
     path.write_text(json.dumps(state))
     monkeypatch.setenv('TWITCH_CLIENT_ID', 'fixture-client')
     monkeypatch.setenv('TWITCH_CLIENT_SECRET', 'fixture-secret')
+    # This fixture exercises the local diagnostic CLI, even when pytest itself
+    # runs inside GitHub Actions. Production requirements are tested below.
+    monkeypatch.delenv('GITHUB_RUN_ID', raising=False)
     monkeypatch.setattr(sys, 'argv', ['collector', '--tracking-state', str(path)])
 
     def stop_after_validation(**kwargs):
