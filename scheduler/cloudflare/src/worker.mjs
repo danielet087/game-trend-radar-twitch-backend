@@ -247,19 +247,221 @@ export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetc
   return { ...base, action: "dispatch", reason: "missing_published_collection", attempts: attemptCount + 1 };
 }
 
-export default {
-  async scheduled(_controller, env, _ctx) {
-    try {
-      // Use actual execution time: a delayed Cron delivery must not backdate live data.
-      const result = await checkAndDispatch(env);
-      console.log(JSON.stringify({ component: "twitch_watchdog", ...result }));
-      return result;
-    } catch (error) {
-      // Do not log fetch errors, response bodies, headers, tokens or environment values.
-      const reason = error instanceof WatchdogError ? error.code : "unexpected_failure";
-      console.error(JSON.stringify({ component: "twitch_watchdog", action: "blocked", reason }));
-      throw new Error(reason);
+// New jobs are opt-in. Until workflow inputs and token permissions are ready,
+// RADAR_ENABLED_JOBS is empty and the existing Twitch monitor is the only job.
+// Destinations cannot be configured by callers or redirected by an API response.
+export const SCHEDULE_JOBS = Object.freeze([
+  { id: "twitch", repo: "game-trend-radar-twitch-backend", workflow: "369223512", enabled: true, minute: 5 },
+  { id: "steam_daily", repo: "game-trend-radar-backend", workflow: "steam-two-phase.yml", enabled: false,
+    minute: 0, taipeiHours: [0], inputs: { refresh_today: "true" } },
+  { id: "steam_catchup", repo: "game-trend-radar-backend", workflow: "steam-official-daily-catchup-250.yml", enabled: false,
+    minute: 0, taipeiHours: Array.from({ length: 21 }, (_, index) => index + 3),
+    blockingWorkflows: ["steam-public-growth.yml", "steam-two-phase.yml", "steam-official-backlog-oneoff-20260923.yml",
+      "steam-official-nearfirst-batch-once.yml", "steam-official-hour-stress-once.yml"] },
+  { id: "steam_growth", repo: "game-trend-radar-backend", workflow: "steam-public-growth.yml", enabled: false,
+    minute: 15, taipeiHours: [1], blockingWorkflows: ["steam-official-daily-catchup-250.yml", "steam-official-backlog-oneoff-20260923.yml",
+      "steam-official-nearfirst-batch-once.yml", "steam-official-hour-stress-once.yml"] },
+  { id: "steam_content", repo: "game-trend-radar-content-backend", workflow: "steam-catalog-reconcile.yml", enabled: false,
+    minute: 30, taipeiHours: [7, 19] },
+  { id: "frontend_insights", repo: "game-trend-radar", workflow: "radar-insights.yml", enabled: false, minute: 17 },
+].map((job) => Object.freeze({ ...job,
+  ...(job.taipeiHours ? { taipeiHours: Object.freeze(job.taipeiHours) } : {}),
+  ...(job.blockingWorkflows ? { blockingWorkflows: Object.freeze(job.blockingWorkflows) } : {}),
+  ...(job.inputs ? { inputs: Object.freeze(job.inputs) } : {}),
+})));
+
+function clockEpoch(time) {
+  const epoch = typeof time === "number" ? time : Date.parse(time);
+  if (!Number.isFinite(epoch) || !Number.isFinite(new Date(epoch).getTime())) throw new WatchdogError("invalid_clock");
+  return epoch;
+}
+
+function minuteSlot(time) {
+  return new Date(Math.floor(clockEpoch(time) / 60_000) * 60_000).toISOString().replace(".000Z", "Z");
+}
+
+function taipeiDay(time) {
+  return new Date(clockEpoch(time) + 8 * HOUR_MS).toISOString().slice(0, 10);
+}
+
+export function scheduledJobs(time) {
+  const epoch = clockEpoch(time);
+  const minute = new Date(epoch).getUTCMinutes();
+  const taipeiHour = new Date(epoch + 8 * HOUR_MS).getUTCHours();
+  return SCHEDULE_JOBS.filter((job) => job.minute === minute &&
+    (!job.taipeiHours || job.taipeiHours.includes(taipeiHour)))
+    .map((job) => ({ job_id: job.id, target_slot: job.id === "twitch" ? hourSlot(epoch) : minuteSlot(epoch) }));
+}
+
+function enabledJobIds(env) {
+  const value = env.RADAR_ENABLED_JOBS ?? "";
+  if (typeof value !== "string") throw new WatchdogError("invalid_enabled_jobs");
+  const ids = value.trim() ? value.split(",").map((id) => id.trim()) : [];
+  if (new Set(ids).size !== ids.length || ids.some((id) =>
+    !SCHEDULE_JOBS.some((job) => job.id === id && !job.enabled))) {
+    throw new WatchdogError("invalid_enabled_jobs");
+  }
+  return new Set(["twitch", ...ids]);
+}
+
+function schedulerConfig(env) {
+  const settings = config(env);
+  if (settings.owner !== "danielet087" || settings.repo !== "game-trend-radar-twitch-backend" ||
+      settings.frontendRepo !== "game-trend-radar" || settings.workflow !== "369223512" || settings.branch !== "main") {
+    throw new WatchdogError("destination_not_allowed");
+  }
+  return settings;
+}
+
+function settingsForJob(settings, job) {
+  return { ...settings, repo: job.repo, workflow: job.workflow };
+}
+
+function safeReason(error) {
+  return error instanceof WatchdogError ? error.code : "unexpected_failure";
+}
+
+function namedForSlot(run, slot) {
+  return typeof run.display_title === "string" &&
+    run.display_title.split(/\s*[|·]\s*/).includes(`slot=${slot}`);
+}
+
+// These maps close duplicate delivery races within one Worker isolate only.
+// Durable protection remains the workflow's concurrency-held slot guard.
+const inflightJobs = new Set();
+const attemptedSlots = new Map();
+const SLOT_MEMORY_MS = 48 * HOUR_MS;
+
+async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
+  const base = { job_id: job.id, target_slot: slot };
+  const key = `${job.id}:${slot}`;
+  for (const [oldKey, attemptedAt] of attemptedSlots) {
+    if (now - attemptedAt > SLOT_MEMORY_MS) attemptedSlots.delete(oldKey);
+  }
+  if (attemptedSlots.has(key)) return { ...base, action: "wait", reason: "slot_dispatch_attempted" };
+  if (inflightJobs.has(job.id)) return { ...base, action: "wait", reason: "controller_check_active" };
+  inflightJobs.add(job.id);
+  try {
+    const jobSettings = settingsForJob(settings, job);
+    // GitHub concurrency retains just one pending run per group. Inspect known
+    // group peers before dispatch so a new hourly run does not replace a pending
+    // growth run. Catchup also waits for daily discovery to finish updating data.
+    const blockingChecks = await Promise.allSettled([job.workflow, ...(job.blockingWorkflows || [])].map(async (workflow) => ({
+      workflow, active: await activeRun(fetchImpl, { ...jobSettings, workflow }),
+    })));
+    const failedCheck = blockingChecks.find((result) => result.status === "rejected");
+    if (failedCheck) throw failedCheck.reason;
+    const activeCheck = blockingChecks.find((result) => result.value.active);
+    if (activeCheck) return { ...base, action: "wait", reason: "workflow_active",
+      run_id: activeCheck.value.active.id, blocking_workflow: activeCheck.value.workflow };
+    const runs = await recentRuns(fetchImpl, jobSettings, slot);
+    const justStarted = runs.find((run) => run.status !== "completed");
+    if (justStarted) return { ...base, action: "wait", reason: "workflow_active", run_id: justStarted.id };
+    const matching = runs.filter((run) => namedForSlot(run, slot));
+    if (matching.length) {
+      const success = matching.find((run) => run.conclusion === "success");
+      return { ...base, action: "skip", reason: success ? "slot_completed" : "slot_already_attempted",
+        run_id: (success || matching[0]).id };
     }
+    const options = apiOptions(jobSettings.token);
+    // Mark before POST: a timeout can mean GitHub accepted the dispatch but its
+    // response was lost. Do not blindly repeat a daily progress reset.
+    attemptedSlots.set(key, now);
+    await request(fetchImpl,
+      `${API_ROOT}/repos/${jobSettings.owner}/${jobSettings.repo}/actions/workflows/${jobSettings.workflow}/dispatches`, {
+        ...options,
+        method: "POST",
+        headers: { ...options.headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: "main", inputs: { ...job.inputs, target_slot: slot, trigger_source: "cloudflare" } }),
+      }, "github_dispatch");
+    return { ...base, action: "dispatch", reason: "scheduled_slot_due" };
+  } finally {
+    inflightJobs.delete(job.id);
+  }
+}
+
+export async function checkScheduledJobs(env, {
+  now = Date.now(), scheduledTime = now, fetchImpl = fetch,
+} = {}) {
+  const epoch = clockEpoch(now);
+  const scheduledEpoch = clockEpoch(scheduledTime);
+  if (scheduledEpoch > epoch + CLOCK_TOLERANCE_MS) {
+    return [{ action: "blocked", reason: "future_cron_delivery" }];
+  }
+  if (scheduledEpoch > epoch) return [{ action: "wait", reason: "before_scheduled_slot" }];
+  // Select only the original Cron minute's jobs, even when delivery is a little
+  // late. Hourly observations cannot cross an hour; daily tasks cannot cross
+  // their Taiwan date. Preserve the original due instant in workflow inputs.
+  const due = scheduledJobs(scheduledEpoch);
+  if (!due.length) return [{ action: "skip", reason: "no_job_due" }];
+  const enabled = enabledJobIds(env);
+  let settings;
+  try { settings = schedulerConfig(env); }
+  catch (error) {
+    return due.map((item) => ({ ...item, action: enabled.has(item.job_id) ? "blocked" : "skip",
+      reason: enabled.has(item.job_id) ? safeReason(error) : "job_staged" }));
+  }
+  // Isolate failures: an inaccessible Steam or frontend repo cannot disable the
+  // working Twitch monitor. Every network request retains timeout/redirect rules.
+  return Promise.all(due.map(async ({ job_id, target_slot }) => {
+    if (!enabled.has(job_id)) return { job_id, target_slot, action: "skip", reason: "job_staged" };
+    const hourly = ["twitch", "steam_catchup", "frontend_insights"].includes(job_id);
+    if (hourly ? hourSlot(epoch) !== hourSlot(scheduledEpoch) : taipeiDay(epoch) !== taipeiDay(scheduledEpoch)) {
+      return { job_id, target_slot, action: "skip", reason: "stale_cron_delivery" };
+    }
+    try {
+      if (job_id === "twitch") {
+        return { job_id, ...await checkAndDispatch(env, { now: epoch, fetchImpl }) };
+      }
+      const job = SCHEDULE_JOBS.find((item) => item.id === job_id);
+      return await checkAdditionalJob(job, settings, target_slot, fetchImpl, epoch);
+    } catch (error) {
+      return { job_id, target_slot, action: "blocked", reason: safeReason(error) };
+    }
+  }));
+}
+
+export async function probeSchedulerPermissions(env, { fetchImpl = fetch } = {}) {
+  // Explicit, read-only preflight. Never infer Actions write access from GET:
+  // only a real approved dispatch can establish that permission conclusively.
+  const settings = schedulerConfig(env);
+  return Promise.all(SCHEDULE_JOBS.map(async (job) => {
+    try {
+      const response = await request(fetchImpl,
+        `${API_ROOT}/repos/${settings.owner}/${job.repo}/actions/workflows/${job.workflow}`,
+        apiOptions(settings.token), "github_workflow");
+      const workflow = await readJson(response, "github_workflow");
+      if (!workflow || !Number.isSafeInteger(workflow.id) || workflow.id <= 0 ||
+          typeof workflow.path !== "string" || workflow.state !== "active") {
+        throw new WatchdogError("github_workflow_not_ready");
+      }
+      const expectedPath = job.id === "twitch" ? ".github/workflows/collect.yml" : `.github/workflows/${job.workflow}`;
+      if (workflow.path !== expectedPath) throw new WatchdogError("github_workflow_path_mismatch");
+      return { job_id: job.id, repo: job.repo, workflow: job.workflow,
+        action: "readable", reason: "actions_write_unverified" };
+    } catch (error) {
+      return { job_id: job.id, repo: job.repo, workflow: job.workflow, action: "blocked", reason: safeReason(error) };
+    }
+  }));
+}
+
+export default {
+  async scheduled(controller, env, _ctx) {
+    let results;
+    try {
+      const now = Date.now();
+      results = await checkScheduledJobs(env, { now, scheduledTime: controller?.scheduledTime ?? now });
+    } catch (error) {
+      results = [{ action: "blocked", reason: safeReason(error) }];
+    }
+    for (const result of results) {
+      // Do not log fetch errors, response bodies, headers, tokens or environment values.
+      const output = JSON.stringify({ component: "radar_scheduler", ...result });
+      if (result.action === "blocked") console.error(output);
+      else console.log(output);
+    }
+    if (results.some((result) => result.action === "blocked")) throw new Error("scheduler_job_blocked");
+    return results;
   },
   fetch() {
     // Even if a route is accidentally enabled, HTTP traffic cannot trigger a job.

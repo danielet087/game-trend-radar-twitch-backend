@@ -1,6 +1,37 @@
-# Twitch 排程監控器（Cloudflare Workers）
+# Game Trend Radar 排程控制器（Cloudflare Workers）
 
-每小時第 05 分檢查 Twitch 收集工作（Cron：`5 * * * *`），缺少當小時資料時才觸發收集。Python 仍在 GitHub Actions 執行，這裡只查狀態與觸發 workflow。Cloudflare 每小時只檢查一次，不在同一小時內定期重試；GitHub 第 17 分排程保留為備援。Worker 不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
+目前維持每小時第 05 分檢查 Twitch 收集工作（Cron：`5 * * * *`），缺少當小時資料時才觸發收集。其餘五種工作已準備好但預設停用，`RADAR_ENABLED_JOBS` 為空字串；在權限與 workflow 輸入完成前，不會觸發新的工作。Python 仍在 GitHub Actions 執行，Worker 只查狀態與觸發 workflow，不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
+
+## 全部排程切換準備
+
+統一控制器限定 `danielet087`、`main` 與下列目的 workflow，不能透過環境變數指定其他儲存庫。既有 Twitch 回條驗證、每日資料與收集前 guard 維持原邏輯。
+
+| 工作 ID | 台灣時間 | 儲存庫 | Workflow | 額外輸入 |
+| --- | --- | --- | --- | --- |
+| `twitch` | 每小時第 05 分 | `game-trend-radar-twitch-backend` | `collect.yml`（ID `369223512`） | `force=false` |
+| `steam_daily` | 每日 00:00 | `game-trend-radar-backend` | `steam-two-phase.yml` | `refresh_today=true` |
+| `steam_catchup` | 每日 03:00–23:00，每小時整點 | `game-trend-radar-backend` | `steam-official-daily-catchup-250.yml` | — |
+| `steam_growth` | 每日 01:15 | `game-trend-radar-backend` | `steam-public-growth.yml` | — |
+| `steam_content` | 每日 07:30、19:30 | `game-trend-radar-content-backend` | `steam-catalog-reconcile.yml` | — |
+| `frontend_insights` | 每小時第 17 分 | `game-trend-radar` | `radar-insights.yml` | — |
+
+五個新 workflow 必須接受 `target_slot` 與 `trigger_source=cloudflare`；`target_slot` 使用原定到期時刻的 UTC ISO 字串，包含分鐘，並且 `run-name` 須含獨立 `slot=<同一時刻>` 欄位。例如 `Steam growth | slot=2026-10-02T17:15:00Z | cloudflare`。Twitch 仍使用 UTC 整點小時作為 slot。
+
+尚待完成的設定：
+
+1. 先確認四個儲存庫的 workflow 都已支援上述輸入、run-name、既有 concurrency，以及在真正修改資料前的 slot guard。每日刷新尤其須避免重複 slot 再次重設進度。
+2. 將既有 GitHub fine-grained token 的 Repository access 擴充至 **`game-trend-radar-twitch-backend`、`game-trend-radar-backend`、`game-trend-radar-content-backend`、`game-trend-radar` 四個儲存庫**，Repository permissions 的 **Actions → Read and write**。控制器不需要 Contents write；資料發布仍由 GitHub 既有 Secrets 處理。將更新後 token 套用到現有 Cloudflare Secret `GITHUB_ACTIONS_TOKEN`，不要提交或公開 token。
+3. 可使用 `probeSchedulerPermissions(env)` 做 read-only 檢查：它只 GET 固定 workflow，對每個目的回報讀取結果，完全不 dispatch。GET 成功只能確認 Actions 讀取與 workflow 存在，**不能證明 Actions write 權限**；實際派發被拒絕時仍會以 403 停止該工作，不會改派其他目的地。
+4. 權限與 workflow 就緒後，將 `RADAR_ENABLED_JOBS` 設為 `steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights`，將 `[triggers]` 改為單一 Cron `crons = ["0,5,15,17,30 * * * *"]`。目前 staging 設定檔刻意保留空的 enable 清單與原本 `5 * * * *`，不可只更新 Cron 就宣稱全部工作已切換。
+5. 正式切換時停用這六種工作的 GitHub 原生 `schedule`，保留 `workflow_dispatch` 與必要的 push/CI 入口；不要讓兩套定時來源長期重複觸發，也不恢復舊的一次性手動工作排程。對照 Cloudflare 日誌與每個 workflow 的 slot 執行紀錄確認切換結果。
+
+單一最終 Cron 每天產生 120 個 tick，每次只查原定 Cron 分鐘到期的工作，Twitch 不會因 00、15、17、30 分的 tick 額外重試。延遲到同一小時內的 Twitch、Followers 補漏與前端分析仍可執行；跨小時則略過，避免補造舊時段觀测。每日刷新、成長與內容工作僅接受原定台灣日期內的延遲，不跨日補跑。傳入 workflow 的 slot 始終是原定到期時刻；Twitch 收集仍記錄實際量測時間。
+
+新工作會分別查五種 active 狀態，再分頁檢查最近執行紀錄。找到同 slot 的成功 run 就略過；同 slot 已失敗、取消或略過也不自動重送，避免每日 reset 被重複執行。成長／Followers 另查同 concurrency 群組的已知工作；Followers 也等待每日發現工作完成，避免新派發替換另一條流程已排隊的工作。三個相關手動一次性 workflow 僅列為 active blockers，不列入排程或 dispatch 清單。
+
+缺少 Secret、目的地設定不符、403、重新導向或不完整回應都會阻擋該工作；某個新儲存庫的權限問題不會停用既有 Twitch 工作。Worker 在同一 isolate 內另有進行中檢查與已派發 slot 保護，HTTP timeout 也不盲目重送。這是記憶體保護，不能代替 workflow 持久 slot guard，也不宣稱跨 isolate 的 exactly-once。
+
+以下 Twitch 專用流程與 GitHub 第 17 分備援敘述，適用於目前尚未切換的 staging 狀態；正式切換後依上表與單一 Cloudflare Cron 運作。
 
 ## 判斷流程
 

@@ -14,6 +14,9 @@ GITHUB_REPO = "game-trend-radar-twitch-backend"
 GITHUB_WORKFLOW_ID = "369223512"
 GITHUB_BRANCH = "main"
 FRONTEND_REPO = "game-trend-radar"
+# Staging: new workflows stay disabled until all four repositories permit
+# Actions read/write and each workflow accepts the controller's slot inputs.
+RADAR_ENABLED_JOBS = ""
 
 # GITHUB_ACTIONS_TOKEN is a Cloudflare Secret, never a variable in this file.
 [observability]
