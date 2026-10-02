@@ -217,6 +217,7 @@ def collect_candidates(
     monotonic: Callable[[], float] = time.monotonic,
     tracking_state: dict | None = None,
     steam_catalog: dict | None = None, steam_mapping_state: dict | None = None,
+    steam_discovery_state: dict | None = None,
 ) -> dict[str, Any]:
     collection_started = monotonic()
     if not math.isfinite(max_collection_seconds) or max_collection_seconds <= 0:
@@ -490,6 +491,19 @@ def collect_candidates(
     tracked = [row for row in measured_rows.values()
                if tracking["games"].get(row["game_id"], {}).get("status") == "active"]
     tracked.sort(key=lambda row: (-row["viewer_count"], row["game_id"]))
+    # Reverse lookup follows enrollment so a newly discovered Twitch game can
+    # join the durable Steam intake queue during this very collection. This
+    # metadata pass never replaces actual census rows or writes the catalog.
+    discoveries = None
+    if steam_catalog is not None or steam_discovery_state is not None:
+        from collectors.twitch_steam_discovery import refresh_discoveries
+
+        discoveries = refresh_discoveries(
+            client, tracking, steam_catalog, steam_discovery_state,
+            now or datetime.now(timezone.utc), deadline=deadline, monotonic=monotonic,
+        )
+        finished = now or datetime.now(timezone.utc)
+        tracking["updated_at"] = timestamp(finished)
     return {
         "schema_version": 2, "generated_at": timestamp(finished), "collection_started_at": timestamp(clock),
         "source": "Twitch Helix API", "min_viewers": min_viewers,
@@ -527,4 +541,6 @@ def collect_candidates(
         "tracked_games": tracked,
         "tracking_state": tracking,
         "steam_mapping_state": mappings, "steam_catalog_summary": steam_summary,
+        **({"steam_discovery_state": discoveries,
+            "steam_discovery_summary": discoveries.get("report", {})} if discoveries is not None else {}),
     }

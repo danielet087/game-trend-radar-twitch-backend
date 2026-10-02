@@ -12,7 +12,9 @@ from collectors.twitch_candidates import REGISTRY_PATH, collect_candidates as co
 from collectors.twitch_newness import RELEASE_DATES_PATH
 from collectors.twitch_audience import CACHE_PATH
 from scripts.collection_guard import validate_slot
-from scripts.load_twitch_tracking import validate_persisted_mapping, validate_persisted_tracking
+from scripts.load_twitch_tracking import (
+    validate_persisted_discovery, validate_persisted_mapping, validate_persisted_tracking,
+)
 from collectors.steam_twitch_mapping import normalize_steam_catalog
 
 
@@ -32,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracking-state", help="Persisted frontend tracking registry; required for scheduled collection")
     parser.add_argument("--steam-catalog", help="Curated Steam catalog from the same frontend commit as the tracking registry")
     parser.add_argument("--steam-mapping", help="Persisted Steam AppID / IGDB / Twitch ID mapping from that frontend commit")
+    parser.add_argument("--steam-discovery", help="Persisted Twitch-to-Steam intake discoveries from that frontend commit")
     parser.add_argument("--followers-max-calls", type=int, default=None,
                         help="Optional diagnostic follower request cap; default: no separate cap")
     parser.add_argument("--followers-max-seconds", type=float, default=None,
@@ -60,8 +63,12 @@ def main() -> None:
         raise SystemExit("--tracking-state is required for production collection; refusing to reset enrollments")
     if production and (not args.steam_catalog or not args.steam_mapping):
         raise SystemExit("--steam-catalog and --steam-mapping are required for production collection")
+    if production and not args.steam_discovery:
+        raise SystemExit("--steam-discovery is required for production collection; refusing to reset Steam intake")
     if args.steam_mapping and not args.steam_catalog:
         raise SystemExit("--steam-mapping requires --steam-catalog")
+    if args.steam_discovery and not args.steam_catalog:
+        raise SystemExit("--steam-discovery requires --steam-catalog")
     tracking_state = (validate_persisted_tracking(json.loads(Path(args.tracking_state).read_text(encoding="utf-8")))
                       if args.tracking_state else None)
     steam_catalog = json.loads(Path(args.steam_catalog).read_text(encoding="utf-8")) if args.steam_catalog else None
@@ -71,6 +78,8 @@ def main() -> None:
     if args.steam_mapping:
         persisted_mapping = json.loads(Path(args.steam_mapping).read_text(encoding="utf-8"))
         steam_mapping = validate_persisted_mapping(persisted_mapping)
+    steam_discovery = (validate_persisted_discovery(json.loads(Path(args.steam_discovery).read_text(encoding="utf-8")))
+                       if args.steam_discovery else None)
 
     payload = collect_twitch(
         client_id=client_id,
@@ -90,6 +99,7 @@ def main() -> None:
         tracking_state=tracking_state,
         steam_catalog=steam_catalog,
         steam_mapping_state=steam_mapping,
+        steam_discovery_state=steam_discovery,
     )
     if args.target_slot:
         payload["collection_schedule"] = {
@@ -112,6 +122,9 @@ def main() -> None:
     steam_summary = payload.get("steam_catalog_summary", {})
     if steam_summary:
         print(f"Steam/Twitch mapping: {json.dumps(steam_summary, ensure_ascii=False)}")
+    discovery_summary = payload.get("steam_discovery_summary", {})
+    if discovery_summary:
+        print(f"Twitch/Steam intake: {json.dumps(discovery_summary, ensure_ascii=False)}")
     print(f"Twitch {twitch_trial['window_days']}-day trial: {twitch_trial['evaluated_candidates']} evaluated / "
           f"{twitch_trial['unknown_candidates']} unknown; IGDB {igdb_trial['window_days']}-day filter: "
           f"{igdb_trial['evaluated_candidates']} evaluated candidates / "
@@ -171,6 +184,11 @@ def main() -> None:
                 summary.write("Steam 上市未滿 30 天的已配對遊戲不受 7,000 人收錄門檻限制；"
                               "Twitch 熱門新作維持獨立來源。圖片沿用 Twitch。\n\n")
                 summary.write("```json\n" + json.dumps(steam_summary, ensure_ascii=False, indent=2) + "\n```\n")
+            if discovery_summary:
+                summary.write("\n### Twitch 發現的 Steam 補入候選\n\n")
+                summary.write("只反查有效 Twitch 熱門新作來源；Steam AppID 經正式連結確認後保存於補入佇列，"
+                              "由 Steam 後端查驗台灣商店內容並發布。API 失敗不冒充沒有 Steam 版本。\n\n")
+                summary.write("```json\n" + json.dumps(discovery_summary, ensure_ascii=False, indent=2) + "\n```\n")
 
 
 if __name__ == "__main__":

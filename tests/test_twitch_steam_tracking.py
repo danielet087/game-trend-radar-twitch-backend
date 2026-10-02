@@ -49,6 +49,8 @@ def stub_mapping(monkeypatch, *, matched=True):
                 entry.update(status="unmatched", twitch_game_id=None, igdb_id=None)
         return result
     monkeypatch.setattr("collectors.steam_twitch_mapping.refresh_mappings", refresh)
+    monkeypatch.setattr("collectors.twitch_steam_discovery.refresh_discoveries",
+                        lambda *args, **kwargs: {"schema_version": 1, "updated_at": timestamp(NOW), "games": {}})
 
 
 def collect(tmp_path, client, payload=None, tracking=None, **kwargs):

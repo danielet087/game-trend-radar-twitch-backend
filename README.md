@@ -37,6 +37,10 @@
 
 ### Steam 與 Twitch 對照
 
+Twitch 新作也會反向補漏 Steam 清單。已正式收錄的 `twitch_new` 遊戲經 Helix 類別 ID → IGDB ID → Steam 外部 AppID 確認後，寫入 `data/twitch_steam_discovery.json`；Steam 主後端每小時讀取這份持久佇列，完成官方商品、台灣日期、成人內容與真實 Followers 核對後加入主資料並送內容補充。此來源不要求 Steam Followers ≥5,000；原有 Steam 搜尋門檻維持。僅 Steam 來源的遊戲不回流成 Twitch 新作收錄，沒有新作證據的熱門候選也不觸發此入口。
+
+沒有 IGDB Steam 連結只表示待確認，每 24 小時補查；API 故障保留已確認資料，不能宣稱遊戲沒有 Steam 版本。逆向佇列與逐時資料一起發布，入列證據與首次發現時間保留。Steam 收錄狀態以主後端匯入結果及前端實際發布為準，找到 AppID 不表示内容已補齊。
+
 從 Steam AppID 查 IGDB `external_games` 的 Steam 外部 ID，再以 IGDB game ID 批次查 Helix `Get Games`，得到 Twitch 類別 ID。Steam 外部來源 ID 由 `external_game_sources` 查詢，不沿用已棄用的 `category` 寫法。匹配成功的 ID 快取；未找到或多個候選分別保存待配對狀態，按重試期限補查，不將名稱相似當作確認配對。
 
 `data/twitch_steam_mapping.json` 保存 ID 對照、配對依據與 Steam 補充資訊。名稱、TAG、關注度、Steam 商店連結及上市資訊可補充至 Twitch 觀測；圖片始終使用 Twitch `box_art_url`。尚未找到 Twitch 類別的 Steam 遊戲保持待配對，未量測人數為空值。Twitch 類別數據涵蓋該類別的直播，不表示每位主播使用 Steam 版；對應也不代表已確認官方「全新」標記。

@@ -11,12 +11,82 @@ from pathlib import Path
 from collectors.twitch_candidates import parse_timestamp, timestamp
 from collectors.twitch_live import write_json
 from collectors.twitch_tracking import normalize_tracking_state
-from scripts.load_twitch_tracking import validate_persisted_mapping, validate_persisted_tracking
+from scripts.load_twitch_tracking import (
+    validate_persisted_discovery, validate_persisted_mapping, validate_persisted_tracking,
+)
 
 TAIPEI = timezone(timedelta(hours=8))
 STATUS_PATH = "data/twitch_collection_status.json"
 TRACKING_PATH = "data/twitch_tracking.json"
 MAPPING_PATH = "data/twitch_steam_mapping.json"
+DISCOVERY_PATH = "data/twitch_steam_discovery.json"
+
+
+def merge_discovery_state(existing: dict | None, incoming: dict) -> dict:
+    """Union intake provenance while keeping the latest successful ID decision.
+
+    Public catalog membership changes on every metadata pass, independently of
+    the cached IGDB lookup. Failed lookups have no new authoritative checked_at.
+    """
+    new = validate_persisted_discovery(incoming)
+    if existing is None:
+        return new
+    old = validate_persisted_discovery(existing)
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+
+    def clock(state):
+        return parse_timestamp(state["updated_at"]) if state.get("updated_at") else floor
+
+    def identity_clock(entry):
+        return parse_timestamp(entry["checked_at"]) if entry.get("checked_at") else floor
+
+    def metadata_clock(entry, state):
+        return parse_timestamp(entry["updated_at"]) if entry.get("updated_at") else clock(state)
+
+    result = deepcopy(new if clock(new) >= clock(old) else old)
+    result["games"] = {}
+    catalog_states = [state for state in (old, new) if isinstance(state.get("source_catalog"), dict)]
+    public_ids = None
+    if catalog_states:
+        catalog_state = max(catalog_states, key=lambda state: (
+            parse_timestamp(state["source_catalog"]["generated_at"]), clock(state)))
+        result["source_catalog"] = deepcopy(catalog_state["source_catalog"])
+        public_ids = set(result["source_catalog"]["appids"])
+    for game_id in sorted(set(old["games"]) | set(new["games"])):
+        previous, current = old["games"].get(game_id), new["games"].get(game_id)
+        if previous is None or current is None:
+            merged = deepcopy(current if previous is None else previous)
+            if public_ids is not None:
+                merged["public_steam_appids"] = [appid for appid in merged.get("steam_appids", []) if appid in public_ids]
+                merged["missing_public_appids"] = [appid for appid in merged.get("steam_appids", []) if appid not in public_ids]
+            result["games"][game_id] = merged
+            continue
+        # checked_at records complete identity decisions, including a real
+        # negative result. updated_at breaks ties for an unchanged cached link.
+        old_order = (identity_clock(previous), metadata_clock(previous, old))
+        new_order = (identity_clock(current), metadata_clock(current, new))
+        merged = deepcopy(current if new_order >= old_order else previous)
+        metadata = current if metadata_clock(current, new) >= metadata_clock(previous, old) else previous
+        for key in ("active", "public_steam_appids", "missing_public_appids", "twitch_enrollment"):
+            if key in metadata:
+                merged[key] = deepcopy(metadata[key])
+        merged["updated_at"] = timestamp(metadata_clock(metadata, new if metadata is current else old))
+        seen = [entry["first_seen_at"] for entry in (previous, current) if entry.get("first_seen_at")]
+        if seen:
+            merged["first_seen_at"] = min(seen, key=parse_timestamp)
+        enrollments = [entry["twitch_enrollment"] for entry in (previous, current)
+                       if isinstance(entry.get("twitch_enrollment"), dict)
+                       and entry["twitch_enrollment"].get("observed_at")]
+        if enrollments:
+            merged["twitch_enrollment"] = deepcopy(min(enrollments,
+                key=lambda value: parse_timestamp(value["observed_at"])))
+        # Membership must refer to the winning identity, even when an older
+        # publication adds a newly confirmed link to fresher catalog metadata.
+        catalog_ids = public_ids if public_ids is not None else set(metadata.get("public_steam_appids", []))
+        merged["public_steam_appids"] = [appid for appid in merged.get("steam_appids", []) if appid in catalog_ids]
+        merged["missing_public_appids"] = [appid for appid in merged.get("steam_appids", []) if appid not in catalog_ids]
+        result["games"][game_id] = merged
+    return validate_persisted_discovery(result)
 
 
 def merge_mapping_state(existing: dict | None, incoming: dict) -> dict:
@@ -215,6 +285,8 @@ def validate_snapshot(payload: dict) -> None:
     tracking = validate_persisted_tracking(payload["tracking_state"]) if "tracking_state" in payload else None
     if "steam_mapping_state" in payload:
         validate_persisted_mapping(payload["steam_mapping_state"])
+    if "steam_discovery_state" in payload:
+        validate_persisted_discovery(payload["steam_discovery_state"])
     if tracked and tracking is None:
         raise ValueError("Tracked observations require their persistent registry")
     for row in tracked:
@@ -284,6 +356,12 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
         validate_persisted_mapping(mapping)
     merged_mapping = (merge_mapping_state(mapping, payload["steam_mapping_state"])
                       if "steam_mapping_state" in payload else mapping)
+    discovery_path = frontend / DISCOVERY_PATH
+    discovery = json.loads(discovery_path.read_text(encoding="utf-8")) if discovery_path.exists() else None
+    if discovery_path.exists():
+        validate_persisted_discovery(discovery)
+    merged_discovery = (merge_discovery_state(discovery, payload["steam_discovery_state"])
+                        if "steam_discovery_state" in payload else discovery)
     order = observation_order(payload)
     update_latest = latest is None or order > observation_order(latest)
     # Receipt and latest must describe the same result. A stale publication may
@@ -315,14 +393,18 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
             latest_payload["tracking_state"] = merged_tracking
         if merged_mapping is not None and "steam_mapping_state" in payload:
             latest_payload["steam_mapping_state"] = merged_mapping
+        if merged_discovery is not None and "steam_discovery_state" in payload:
+            latest_payload["steam_discovery_state"] = merged_discovery
         write_json(latest_payload, latest_path)
     if merged_tracking is not None and merged_tracking != tracking:
         write_json(merged_tracking, tracking_path)
     if merged_mapping is not None and merged_mapping != mapping:
         write_json(merged_mapping, mapping_path)
+    if merged_discovery is not None and merged_discovery != discovery:
+        write_json(merged_discovery, discovery_path)
     same_observation = (latest is not None and
-                        {key: value for key, value in latest.items() if key not in {"tracking_state", "steam_mapping_state"}} ==
-                        {key: value for key, value in payload.items() if key not in {"tracking_state", "steam_mapping_state"}})
+                        {key: value for key, value in latest.items() if key not in {"tracking_state", "steam_mapping_state", "steam_discovery_state"}} ==
+                        {key: value for key, value in payload.items() if key not in {"tracking_state", "steam_mapping_state", "steam_discovery_state"}})
     if scheduled and (update_latest or same_observation) and (status_order is None or order >= status_order):
         receipt = {
             "schema_version": 1,

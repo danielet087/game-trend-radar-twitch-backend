@@ -49,7 +49,7 @@ def test_bundle_uses_one_immutable_commit_and_allows_only_missing_mapping_bootst
         assert not request.has_header("Authorization")
         assert f"/{sha}/" in request.full_url
         path = request.full_url.split(f"/{sha}/", 1)[1]
-        if path == loader.MAPPING_PATH:
+        if path in {loader.MAPPING_PATH, loader.DISCOVERY_PATH}:
             raise HTTPError(request.full_url, 404, "not found", {}, None)
         return io.BytesIO(json.dumps(sources[path]).encode())
 
@@ -58,7 +58,8 @@ def test_bundle_uses_one_immutable_commit_and_allows_only_missing_mapping_bootst
     assert bundle["source_commit"] == sha
     assert bundle["steam_catalog"] == {**steam_catalog(), "_source_commit": sha}
     assert bundle["steam_mapping_state"] == {"schema_version": 1, "updated_at": None, "games": {}}
-    assert len(urls) == 3
+    assert bundle["steam_discovery_state"] == {"schema_version": 1, "updated_at": None, "games": {}}
+    assert len(urls) == 4
 
 
 @pytest.mark.parametrize("bad", [None, {}, {"schema_version": 1, "updated_at": None, "games": []}])
@@ -152,11 +153,13 @@ def test_mapping_and_sources_are_archived_with_real_observation_and_receipt(tmp_
 def test_production_workflow_loads_dual_inputs_and_module_push_bootstraps_only():
     text = (Path(__file__).resolve().parents[1] / ".github/workflows/collect.yml").read_text()
     assert re.findall(r"cron:\s*'([^']+)'", text) == ["17 * * * *"]
-    assert re.search(r"\n  push:\n    branches: \[main\]\n    paths:\n      - 'collectors/steam_twitch_mapping.py'\n  schedule:", text)
+    assert re.search(r"\n  push:\n    branches: \[main\]\n    paths:\n      - 'collectors/steam_twitch_mapping.py'\n      - 'collectors/twitch_steam_discovery.py'\n  schedule:", text)
     load = next(line for line in text.splitlines() if "run: python -m scripts.load_twitch_tracking" in line)
     collect = next(line for line in text.splitlines() if "run: python -m scripts.update_twitch" in line)
     assert "--steam-output output/steam_catalog_input.json" in load
     assert "--mapping-output output/twitch_steam_mapping_input.json" in load
+    assert "--discovery-output output/twitch_steam_discovery_input.json" in load
     assert "--steam-catalog output/steam_catalog_input.json" in collect
     assert "--steam-mapping output/twitch_steam_mapping_input.json" in collect
+    assert "--steam-discovery output/twitch_steam_discovery_input.json" in collect
     assert "FORCE_COLLECTION: ${{ inputs.force || github.event_name == 'push' || false }}" in text

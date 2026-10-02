@@ -21,6 +21,7 @@ from scripts.collection_guard import parse_time
 TRACKING_PATH = "data/twitch_tracking.json"
 STEAM_PATH = "data/steam_upcoming.json"
 MAPPING_PATH = "data/twitch_steam_mapping.json"
+DISCOVERY_PATH = "data/twitch_steam_discovery.json"
 
 
 def validate_persisted_tracking(payload: dict) -> dict:
@@ -43,6 +44,22 @@ def validate_persisted_mapping(payload: dict) -> dict:
         for entry in state["games"].values():
             if entry.get("status") != "pending" or entry.get("checked_at") is not None:
                 parse_time(entry.get("checked_at"))
+    return state
+
+
+def validate_persisted_discovery(payload: dict) -> dict:
+    from collectors.twitch_steam_discovery import normalize_discovery_state
+
+    if not isinstance(payload, dict) or "updated_at" not in payload:
+        raise ValueError("Persisted Twitch/Steam discovery must be a dated object")
+    state = normalize_discovery_state(payload)
+    if state["games"]:
+        parse_time(state.get("updated_at"))
+        for entry in state["games"].values():
+            parse_time(entry.get("first_seen_at"))
+            parse_time(entry.get("updated_at"))
+            if entry.get("checked_at") is not None:
+                parse_time(entry["checked_at"])
     return state
 
 
@@ -72,7 +89,7 @@ def load_published_tracking() -> dict:
 def load_published_inputs() -> dict:
     """Resolve one frontend revision, then load its complete collection inputs.
 
-    Only an absent mapping file is a supported bootstrap condition. Missing
+    Only absent mapping/discovery files are supported bootstrap conditions. Missing
     required data, invalid JSON and any non-404 HTTP error stop collection.
     """
     from collectors.steam_twitch_mapping import normalize_steam_catalog
@@ -89,8 +106,16 @@ def load_published_inputs() -> dict:
             raise
         mapping = {"schema_version": 1, "updated_at": None, "games": {}}
     mapping = validate_persisted_mapping(mapping)
+    try:
+        discovery = read_published_json(commit, DISCOVERY_PATH)
+    except HTTPError as error:
+        if error.code != 404:
+            raise
+        discovery = {"schema_version": 1, "updated_at": None, "games": {}}
+    discovery = validate_persisted_discovery(discovery)
     return {"source_commit": commit, "tracking_state": tracking,
-            "steam_catalog": catalog, "steam_mapping_state": mapping}
+            "steam_catalog": catalog, "steam_mapping_state": mapping,
+            "steam_discovery_state": discovery}
 
 
 def main() -> None:
@@ -98,15 +123,18 @@ def main() -> None:
     parser.add_argument("--output", default="output/twitch_tracking_input.json")
     parser.add_argument("--steam-output", default="output/steam_catalog_input.json")
     parser.add_argument("--mapping-output", default="output/twitch_steam_mapping_input.json")
+    parser.add_argument("--discovery-output", default="output/twitch_steam_discovery_input.json")
     args = parser.parse_args()
     bundle = load_published_inputs()
     write_json(bundle["tracking_state"], args.output)
     write_json(bundle["steam_catalog"], args.steam_output)
     write_json(bundle["steam_mapping_state"], args.mapping_output)
+    write_json(bundle["steam_discovery_state"], args.discovery_output)
     print(f"Loaded frontend {bundle['source_commit']}: "
           f"{len(bundle['tracking_state']['games'])} tracking entries, "
           f"{len(bundle['steam_catalog']['games'])} Steam games and "
-          f"{len(bundle['steam_mapping_state']['games'])} mappings")
+          f"{len(bundle['steam_mapping_state']['games'])} mappings and "
+          f"{len(bundle['steam_discovery_state']['games'])} Steam intake discoveries")
 
 
 if __name__ == "__main__":
