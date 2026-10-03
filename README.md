@@ -227,6 +227,18 @@ python -m scripts.reconcile_steam_metadata --frontend-dir /path/to/frontend
 
 本機收集不需要發布 Token。只有執行 `bash scripts/publish_frontend.sh output/twitch_live.json` 才需要 `FRONTEND_REPO_TOKEN`。
 
+## 一次性 IGDB hypes 測試
+
+Actions 的 **Probe IGDB hypes** 可讀取單款遊戲的原始 `hypes`，預設為 Fire Emblem: Fortune’s Weave（IGDB `366896`）。第一次部署及修改此測試程式時會查詢一次，之後可從 **Run workflow** 手動指定 IGDB ID。它沿用 `TWITCH_CLIENT_ID`／`TWITCH_CLIENT_SECRET`，不需要前端發布 Token。
+
+```bash
+python -m scripts.probe_igdb_hypes --game-id 366896 --output output/igdb_hypes.json
+```
+
+結果顯示於執行摘要，並保存為 `igdb-hypes-result` artifact。JSON 包含實際查詢時間、名稱、平台、平台別發售資料與原始關注數。`hypes` 缺值為 `null`／`missing`，明確查得 `0` 才顯示零；API 或身分驗證失敗則執行失敗，不產生假數值。這是 IGDB 發售前關注指標，不是滿分 100 的評分。
+
+此測試沒有週期排程，不收集 Twitch 直播／Followers，也不修改正式觀測、Nintendo 月曆或前端資料。所有憑證只在 runner 的環境中使用，不寫入輸出。
+
 ## 來源
 
 原始 Twitch 客戶端拆自 `danielet087/game-trend-radar-backend` 的 `86ff4fa9d15aa8c8b9756a102b5ea810241a1de6`；目前命令列改用新的候選流程，舊統計 helper 只保留相容性。未搬移舊 Repo 的 Secrets 或 Actions 紀錄。

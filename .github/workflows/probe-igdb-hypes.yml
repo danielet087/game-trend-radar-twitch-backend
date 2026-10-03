@@ -1,0 +1,73 @@
+name: Probe IGDB hypes
+run-name: "IGDB hypes | game=${{ inputs.game_id || '366896' }} | ${{ github.event_name }}"
+
+# A one-time probe on deployment, plus an explicit manual entry point.
+# No schedule and no frontend publication.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/probe_igdb_hypes.py'
+      - '.github/workflows/probe-igdb-hypes.yml'
+  workflow_dispatch:
+    inputs:
+      game_id:
+        description: 'Exact IGDB game ID (Fire Emblem: Fortune’s Weave = 366896)'
+        required: true
+        type: string
+        default: '366896'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: igdb-hypes-probe-${{ inputs.game_id || '366896' }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies and validate the probe offline
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+          python -m pytest -q tests/test_probe_igdb_hypes.py
+      - name: Read one game's IGDB hypes
+        env:
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          IGDB_GAME_ID: ${{ inputs.game_id || '366896' }}
+        run: python -m scripts.probe_igdb_hypes --game-id "$IGDB_GAME_ID" --output output/igdb_hypes.json
+      - name: Summarize the hypes result
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = json.loads(Path('output/igdb_hypes.json').read_text(encoding='utf-8'))
+          value = str(result['hypes']) if result['hypes_status'] == 'available' else '未知（API 未回傳數值）'
+          name = json.dumps(result['name'], ensure_ascii=False)
+          platforms = json.dumps([item['name'] for item in result['platforms']], ensure_ascii=False)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('### IGDB hypes 一次性測試\n\n')
+              summary.write(f"- IGDB ID：{result['game_id']}\n")
+              summary.write(f'- 遊戲：{name}\n')
+              summary.write(f'- 平台：{platforms}\n')
+              summary.write(f"- hypes：**{value}**\n")
+              summary.write(f"- 實際查詢時間（UTC）：{result['checked_at']}\n")
+              summary.write('- 指標：IGDB 發售前關注數\n')
+          PY
+      - name: Preserve the public query result
+        uses: actions/upload-artifact@v4
+        with:
+          name: igdb-hypes-result
+          path: output/igdb_hypes.json
+          if-no-files-found: error
+          retention-days: 14
