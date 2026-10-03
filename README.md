@@ -39,6 +39,10 @@
 
 Twitch 新作也會反向補漏 Steam 清單。已正式收錄的 `twitch_new` 遊戲經 Helix 類別 ID → IGDB ID → Steam 外部 AppID 確認後，寫入 `data/twitch_steam_discovery.json`；Steam 主後端每小時讀取這份持久佇列，完成官方商品、台灣日期、成人內容與真實 Followers 核對後加入主資料並送內容補充。此來源不要求 Steam Followers ≥5,000；原有 Steam 搜尋門檻維持。僅 Steam 來源的遊戲不回流成 Twitch 新作收錄，沒有新作證據的熱門候選也不觸發此入口。
 
+Helix 暫缺 IGDB ID 時，反向查詢可改用 IGDB 官方 Twitch 外部來源的精確類別 UID；只接受唯一 IGDB 身分，且須符合現有收錄紀錄中的 IGDB 候選。若 Steam 外部連結尚未補齊，另查同一 IGDB 遊戲的官方 website ID 與 `website.game`，只接受唯一 Steam AppID，再以無 Key 的台灣 Steam appdetails 驗證商品、中文名稱及官方內容描述分類。這份 `related_steam_identity` 獨立提供名稱和商店連結，不偽造外部連結、不新增月曆或 Steam 近期上市資格，也不把重製升級日期覆寫成原商品上市日期。
+
+兩條身分查詢沿用既有收集排程，完成的結果快取 24 小時。新版查詢政策會讓舊的待確認或無連結紀錄立即重試一次；website／Steam 暫時失敗則在下一次既有收集重試，保留同一 IGDB 身分的已驗證證據。成功查到身分衝突時會移除舊連結。发布合併以各自的完成查詢時間保護獨立證據，不以新的量測時間覆寫它。
+
 沒有 IGDB Steam 連結只表示待確認，每 24 小時補查；API 故障保留已確認資料，不能宣稱遊戲沒有 Steam 版本。逆向佇列與逐時資料一起發布，入列證據與首次發現時間保留。Steam 收錄狀態以主後端匯入結果及前端實際發布為準，找到 AppID 不表示内容已補齊。
 
 從 Steam AppID 查 IGDB `external_games` 的 Steam 外部 ID，再以 IGDB game ID 批次查 Helix `Get Games`，得到 Twitch 類別 ID。Steam 外部來源 ID 由 `external_game_sources` 查詢，不沿用已棄用的 `category` 寫法。匹配成功的 ID 快取；未找到或多個候選分別保存待配對狀態，按重試期限補查，不將名稱相似當作確認配對。

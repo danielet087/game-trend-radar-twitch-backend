@@ -44,6 +44,12 @@ def merge_discovery_state(existing: dict | None, incoming: dict) -> dict:
         return parse_timestamp(entry["updated_at"]) if entry.get("updated_at") else clock(state)
 
     result = deepcopy(new if clock(new) >= clock(old) else old)
+    for key in ("steam_source_id", "twitch_source_id"):
+        sources = {state[key] for state in (old, new) if state.get(key) is not None}
+        if len(sources) > 1:
+            raise ValueError("Conflicting official discovery source identities")
+        if sources:
+            result[key] = sources.pop()
     result["games"] = {}
     catalog_states = [state for state in (old, new) if isinstance(state.get("source_catalog"), dict)]
     public_ids = None
@@ -80,6 +86,39 @@ def merge_discovery_state(existing: dict | None, incoming: dict) -> dict:
         if enrollments:
             merged["twitch_enrollment"] = deepcopy(min(enrollments,
                 key=lambda value: parse_timestamp(value["observed_at"])))
+        same_identity = [entry for entry in (previous, current)
+                         if entry.get("igdb_id") == merged.get("igdb_id")]
+        versions = [entry.get("lookup_policy_version", 1) for entry in same_identity]
+        if any("lookup_policy_version" in entry for entry in same_identity):
+            merged["lookup_policy_version"] = max(versions)
+        # A complete website decision has its own cache clock. An older
+        # collector can publish fresher census metadata without knowing this
+        # optional proof; it must not erase a valid same-owner identity.
+        related_keys = ("related_steam_identity", "related_lookup_status", "related_checked_at", "related_retry_at")
+        for key in related_keys:
+            merged.pop(key, None)
+        if merged.get("status") == "no_steam_link" and merged.get("igdb_id"):
+            eligible = [entry for entry in same_identity if entry.get("status") == "no_steam_link"]
+            decisions = []
+            for entry in eligible:
+                proof = entry.get("related_steam_identity")
+                checked = entry.get("related_checked_at") or (proof or {}).get("checked_at")
+                if checked and (proof or entry.get("related_lookup_status") == "no_steam_website"):
+                    decisions.append((parse_timestamp(checked), metadata_clock(entry, new if entry is current else old), entry))
+            if decisions:
+                checked, _, decision = max(decisions, key=lambda item: item[:2])
+                for key in related_keys:
+                    if key in decision:
+                        merged[key] = deepcopy(decision[key])
+                merged["related_checked_at"] = timestamp(checked)
+                merged["related_lookup_status"] = "matched" if merged.get("related_steam_identity") else "no_steam_website"
+            operations = [entry for entry in eligible if entry.get("related_lookup_status") is not None]
+            if operations:
+                latest = max(operations, key=lambda entry: metadata_clock(entry, new if entry is current else old))
+                latest_at = metadata_clock(latest, new if latest is current else old)
+                decision_at = max((item[0] for item in decisions), default=floor)
+                if latest.get("related_lookup_status") == "unavailable" and latest_at >= decision_at:
+                    merged.update(related_lookup_status="unavailable", related_retry_at=None)
         # Membership must refer to the winning identity, even when an older
         # publication adds a newly confirmed link to fresher catalog metadata.
         catalog_ids = public_ids if public_ids is not None else set(metadata.get("public_steam_appids", []))

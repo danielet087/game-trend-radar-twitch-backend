@@ -20,6 +20,8 @@ from collectors.twitch_newness import parse_timestamp, timestamp
 from collectors.twitch_tracking import normalize_tracking_state
 
 METHOD = "twitch_igdb_external_steam_v1"
+POLICY_VERSION = 2
+TWITCH_IDENTITY_METHOD = "igdb_external_twitch_uid_v1"
 RETRY_INTERVAL = timedelta(hours=24)
 STATUSES = {"matched", "no_steam_link", "pending", "unavailable"}
 ENROLLMENT_SOURCES = {"igdb_first_release_date", "twitch_original_release_date", "twitch_directory_dom"}
@@ -48,6 +50,42 @@ def _enrollment(value, clock: datetime | None = None) -> dict:
     return deepcopy(value)
 
 
+def _twitch_identity(value: dict, twitch_id: str, igdb_id: str | None) -> dict:
+    """Validate the exact official Twitch UID fallback, never a name match."""
+    if (not isinstance(value, dict) or value.get("method") != TWITCH_IDENTITY_METHOD
+            or _id(value.get("twitch_game_id")) != twitch_id
+            or _id(value.get("igdb_id")) != igdb_id):
+        raise ValueError("Invalid fallback Twitch identity")
+    source = _id(value.get("twitch_source_id"))
+    parse_timestamp(value.get("checked_at"))
+    links = value.get("links")
+    if not isinstance(links, list) or not links:
+        raise ValueError("Fallback identity requires official Twitch links")
+    seen = set()
+    for link in links:
+        if (not isinstance(link, dict) or _id(link.get("external_game_source")) != source
+                or link.get("uid") != twitch_id or _id(link.get("game")) != igdb_id):
+            raise ValueError("Fallback Twitch link does not match")
+        external_id = _id(link.get("external_game_id"))
+        if external_id in seen:
+            raise ValueError("Duplicate fallback Twitch external identity")
+        seen.add(external_id)
+    return deepcopy(value)
+
+
+def _invalidate_identity(row: dict, reason: str, at: str, retry_at: str) -> None:
+    """A completed contradictory lookup invalidates an old positive decision."""
+    # A never-identified category has no completed Steam identity to date.
+    # Invalidating a previously checked owner does need a newer decision clock
+    # so publication races cannot restore its old store proof.
+    checked_at = at if reason != "missing_twitch_igdb_identity" or row.get("checked_at") else None
+    row.update(status="pending", reason=reason, igdb_id=None, steam_appids=[], links=[],
+               public_steam_appids=[], missing_public_appids=[], checked_at=checked_at, retry_at=retry_at,
+               lookup_policy_version=POLICY_VERSION)
+    for key in ("igdb_identity", "related_steam_identity", "related_lookup_status", "related_checked_at", "related_retry_at"):
+        row.pop(key, None)
+
+
 def normalize_discovery_state(payload: dict | None = None) -> dict:
     """Copy and validate persisted identities and their exact official evidence."""
     if payload is None:
@@ -61,6 +99,9 @@ def normalize_discovery_state(payload: dict | None = None) -> dict:
     source = _id(state["steam_source_id"]) if state.get("steam_source_id") is not None else None
     if source is not None:
         state["steam_source_id"] = source
+    twitch_source = _id(state["twitch_source_id"]) if state.get("twitch_source_id") is not None else None
+    if twitch_source is not None:
+        state["twitch_source_id"] = twitch_source
     if state.get("source_catalog") is not None:
         catalog = state["source_catalog"]
         if not isinstance(catalog, dict) or type(catalog.get("count")) is not int:
@@ -83,6 +124,42 @@ def normalize_discovery_state(payload: dict | None = None) -> dict:
             if row.get(key) is not None:
                 parse_timestamp(row[key])
         row["igdb_id"] = _id(row["igdb_id"]) if row.get("igdb_id") is not None else None
+        if "lookup_policy_version" in row and (type(row["lookup_policy_version"]) is not int
+                or not 1 <= row["lookup_policy_version"] <= POLICY_VERSION):
+            raise ValueError("Invalid discovery lookup policy")
+        if row.get("igdb_identity") is not None:
+            row["igdb_identity"] = _twitch_identity(row["igdb_identity"], twitch_id, row["igdb_id"])
+            if (row["igdb_identity"]["twitch_source_id"] != twitch_source
+                    or parse_timestamp(row["igdb_identity"]["checked_at"]) > parse_timestamp(row["updated_at"])
+                    or state.get("updated_at") is None
+                    or parse_timestamp(row["updated_at"]) > parse_timestamp(state["updated_at"])):
+                raise ValueError("Fallback identity source or time does not match its registry")
+        if row.get("related_steam_identity") is not None:
+            from collectors.twitch_steam_website_identity import normalize_website_identity
+            row["related_steam_identity"] = normalize_website_identity(
+                row["related_steam_identity"], twitch_id, row["igdb_id"])
+            if (row["status"] != "no_steam_link"
+                    or parse_timestamp(row["related_steam_identity"]["checked_at"]) > parse_timestamp(row["updated_at"])
+                    or state.get("updated_at") is None
+                    or parse_timestamp(row["updated_at"]) > parse_timestamp(state["updated_at"])):
+                raise ValueError("Website identity does not match its canonical discovery or time")
+        if row.get("related_lookup_status") is not None:
+            if row["related_lookup_status"] not in {"matched", "no_steam_website", "unavailable"}:
+                raise ValueError("Invalid related identity lookup status")
+            if row["status"] != "no_steam_link" or not row["igdb_id"]:
+                raise ValueError("Related lookup requires a canonical IGDB identity")
+            if row["related_lookup_status"] == "matched" and not row.get("related_steam_identity"):
+                raise ValueError("Related match requires website evidence")
+            if row["related_lookup_status"] == "no_steam_website" and row.get("related_steam_identity"):
+                raise ValueError("A negative website decision cannot carry identity evidence")
+        for key in ("related_checked_at", "related_retry_at"):
+            if row.get(key) is not None:
+                parsed = parse_timestamp(row[key])
+                if key == "related_checked_at" and parsed > parse_timestamp(row["updated_at"]):
+                    raise ValueError("Related identity check cannot be from the future")
+        if (row.get("related_steam_identity") and row.get("related_checked_at") is not None
+                and row["related_checked_at"] != row["related_steam_identity"]["checked_at"]):
+            raise ValueError("Related decision time must match its verified proof")
         appids = row["steam_appids"] = _ids(row.get("steam_appids"))
         if not isinstance(row.get("links"), list):
             raise ValueError("Discovery requires official external links")
@@ -181,7 +258,9 @@ def refresh_discoveries(client, tracking_state: dict, public_catalog: dict,
         })
         row["first_seen_at"] = min((row["first_seen_at"], first_seen), key=parse_timestamp)
         row.update(twitch_name=entry["game_name"], twitch_enrollment=evidence, active=True, updated_at=at)
-        if not row.get("retry_at") or parse_timestamp(row["retry_at"]) <= clock:
+        upgraded_negative = (row["status"] in {"pending", "no_steam_link", "unavailable"}
+                             and row.get("lookup_policy_version", 1) < POLICY_VERSION)
+        if upgraded_negative or not row.get("retry_at") or parse_timestamp(row["retry_at"]) <= clock:
             due.append(twitch_id)
     for twitch_id, row in state["games"].items():
         row["active"] = twitch_id in active
@@ -194,7 +273,7 @@ def refresh_discoveries(client, tracking_state: dict, public_catalog: dict,
         for twitch_id in twitch_ids:
             row = state["games"][twitch_id]
             if row["status"] in {"pending", "unavailable"}:
-                row.update(status="unavailable", reason="official_lookup_unavailable")
+                row.update(status="unavailable", reason="official_lookup_unavailable", retry_at=None)
 
     source = state.get("steam_source_id")
     stopped = False
@@ -227,12 +306,86 @@ def refresh_discoveries(client, tracking_state: dict, public_catalog: dict,
                 break
             continue
 
-        linked_ids = sorted({category["igdb_id"] for category in categories.values() if category["igdb_id"]}, key=int)
-        searchable = [twitch_id for twitch_id in batch if (categories.get(twitch_id) or {}).get("igdb_id")]
-        for twitch_id in set(batch) - set(searchable):
+        # Helix occasionally omits igdb_id even though IGDB already owns an
+        # exact Twitch category UID. Only a returned Helix category can use this
+        # fallback; a missing category cannot be restored from stale tracking.
+        blanks = [twitch_id for twitch_id in batch if twitch_id in categories
+                  and categories[twitch_id]["igdb_id"] is None]
+        blocked = set()
+        if blanks:
+            try:
+                twitch_source = state.get("twitch_source_id")
+                if not twitch_source:
+                    sources = _pages(client, "external_game_sources", "fields id,name;", deadline, monotonic)
+                    ids = {_id(item.get("id")) for item in sources if isinstance(item.get("name"), str)
+                           and item["name"].strip().casefold() == "twitch"}
+                    if len(ids) != 1:
+                        raise ValueError("Twitch external source is missing or ambiguous")
+                    twitch_source = state["twitch_source_id"] = ids.pop()
+                quoted = ",".join(f'"{twitch_id}"' for twitch_id in blanks)
+                external = _pages(client, "external_games",
+                    f"fields id,uid,game,external_game_source; where external_game_source = {twitch_source} & uid = ({quoted});",
+                    deadline, monotonic)
+                fallback = {twitch_id: {} for twitch_id in blanks}
+                for item in external:
+                    uid = _id(item.get("uid"))
+                    if (item.get("uid") != uid or _id(item.get("external_game_source")) != twitch_source
+                            or uid not in fallback):
+                        raise ValueError("Unexpected Twitch external identity")
+                    external_id, igdb_id = _id(item.get("id")), _id(item.get("game"))
+                    link = {"external_game_id": external_id, "external_game_source": twitch_source,
+                            "uid": uid, "game": igdb_id}
+                    previous = fallback[uid].get(external_id)
+                    if previous is not None and previous != link:
+                        raise ValueError("Conflicting Twitch external identities")
+                    fallback[uid][external_id] = link
+                for twitch_id in blanks:
+                    links = sorted(fallback[twitch_id].values(), key=lambda link: int(link["external_game_id"]))
+                    identities = {link["game"] for link in links}
+                    entry = active[twitch_id][0]
+                    cached = entry.get("igdb_id") or (entry.get("last_observation") or {}).get("igdb_id")
+                    if cached is not None:
+                        cached = _id(cached)
+                    existing = state["games"][twitch_id].get("igdb_id")
+                    reason = ("ambiguous_twitch_igdb_identity" if len(identities) > 1 else
+                              "conflicting_twitch_igdb_identity" if identities and
+                              ((cached and cached not in identities) or (existing and existing not in identities)) else
+                              "missing_twitch_igdb_identity" if not identities else None)
+                    if reason:
+                        blocked.add(twitch_id)
+                        row = state["games"][twitch_id]
+                        if reason in {"ambiguous_twitch_igdb_identity", "conflicting_twitch_igdb_identity"}:
+                            _invalidate_identity(row, reason, at, timestamp(clock + RETRY_INTERVAL))
+                        elif row["status"] != "matched":
+                            _invalidate_identity(row, reason, at, timestamp(clock + RETRY_INTERVAL))
+                        continue
+                    igdb_id = identities.pop()
+                    categories[twitch_id].update(igdb_id=igdb_id, igdb_identity={
+                        "method": TWITCH_IDENTITY_METHOD, "twitch_game_id": twitch_id, "igdb_id": igdb_id,
+                        "twitch_source_id": twitch_source, "checked_at": at, "links": links})
+            except FAILURES as exc:
+                blocked.update(blanks)
+                failure("twitch_external_identity", blanks, exc)
+                if isinstance(exc, CollectionDeadlineExceeded):
+                    stopped = True
+                    break
+
+        searchable = [twitch_id for twitch_id in batch if twitch_id not in blocked
+                      and (categories.get(twitch_id) or {}).get("igdb_id")]
+        linked_ids = sorted({categories[twitch_id]["igdb_id"] for twitch_id in searchable}, key=int)
+        for twitch_id in searchable:
+            row, current_igdb = state["games"][twitch_id], categories[twitch_id]["igdb_id"]
+            if row.get("igdb_id") and row["igdb_id"] != current_igdb:
+                # Unlike an outage, a fresh official category has positively
+                # contradicted the old IGDB ownership. Do not retain its link.
+                _invalidate_identity(row, "conflicting_current_igdb_identity", at, timestamp(clock + RETRY_INTERVAL))
+        for twitch_id in set(batch) - set(searchable) - blocked:
             row = state["games"][twitch_id]
             if row["status"] != "matched":
-                row.update(status="pending", reason="missing_twitch_igdb_identity", retry_at=timestamp(clock + RETRY_INTERVAL))
+                # A completed missing-identity decision must not leave an
+                # independent website proof attached to a pending row.
+                # There is no current owner against which to bind that proof.
+                _invalidate_identity(row, "missing_twitch_igdb_identity", at, timestamp(clock + RETRY_INTERVAL))
         if not searchable:
             continue
         if not source:
@@ -274,12 +427,52 @@ def refresh_discoveries(client, tracking_state: dict, public_catalog: dict,
                 row.update(twitch_name=category["name"], igdb_id=category["igdb_id"], links=links, steam_appids=appids,
                            status="matched" if appids else "no_steam_link", checked_at=at,
                            retry_at=timestamp(clock + RETRY_INTERVAL),
+                           lookup_policy_version=POLICY_VERSION,
                            reason="authoritative_id_chain" if appids else "no_igdb_steam_link")
+                row.pop("igdb_identity", None)
+                if category.get("igdb_identity"):
+                    row["igdb_identity"] = deepcopy(category["igdb_identity"])
+                if appids:
+                    for key in ("related_steam_identity", "related_lookup_status", "related_checked_at", "related_retry_at"):
+                        row.pop(key, None)
+                else:
+                    # The complete direct lookup has its own 24-hour cache.
+                    # Website/Store failures can retry next hourly collection
+                    # without forcing another direct external_games request.
+                    row["related_retry_at"] = None
         except FAILURES as exc:
             failure("external_games", searchable, exc)
             if isinstance(exc, CollectionDeadlineExceeded):
                 stopped = True
                 break
+
+    related_lookup_count = 0
+    if not stopped:
+        from collectors.twitch_steam_website_identity import lookup_website_identity
+        for twitch_id in sorted(active, key=int):
+            row = state["games"][twitch_id]
+            if row["status"] != "no_steam_link" or not row.get("igdb_id"):
+                continue
+            if row.get("related_retry_at") and parse_timestamp(row["related_retry_at"]) > clock:
+                continue
+            related_lookup_count += 1
+            try:
+                identity = lookup_website_identity(client, twitch_id, row["igdb_id"], clock,
+                                                   deadline=deadline, monotonic=monotonic)
+                row.update(related_lookup_status="matched" if identity else "no_steam_website",
+                           related_checked_at=at, related_retry_at=timestamp(clock + RETRY_INTERVAL))
+                if identity:
+                    row["related_steam_identity"] = identity
+                else:
+                    row.pop("related_steam_identity", None)
+            except FAILURES as exc:
+                # A cached website identity remains useful only while the
+                # canonical IGDB owner is unchanged. Its checked_at is real.
+                row.update(related_lookup_status="unavailable", related_retry_at=None)
+                errors.append({"stage": "igdb_steam_website", "twitch_game_ids": [twitch_id], "reason": _error(exc)})
+                if isinstance(exc, CollectionDeadlineExceeded):
+                    stopped = True
+                    break
 
     for row in state["games"].values():
         row["public_steam_appids"] = sorted(set(row["steam_appids"]) & public, key=int)
@@ -290,6 +483,7 @@ def refresh_discoveries(client, tracking_state: dict, public_catalog: dict,
     counts = Counter(state["games"][twitch_id]["status"] for twitch_id in active)
     state["report"] = {"status": "unavailable_or_partial" if errors else "ok", "active_twitch_games": len(active),
                        "lookup_count": len(due), "counts": dict(counts), "errors": errors,
+                       "related_lookup_count": related_lookup_count,
                        "deadline_exhausted": stopped,
                        "missing_public_appids": sorted({appid for twitch_id in active
                            for appid in state["games"][twitch_id]["missing_public_appids"]}, key=int)}

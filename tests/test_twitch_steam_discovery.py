@@ -83,9 +83,12 @@ class Client:
 
 
 def first_responses(*links):
-    return [("games", {"data": [category()]}),
-            ("external_game_sources", [{"id": 1, "name": "GOG"}, {"id": 45, "name": "sTeAm"}]),
-            ("external_games", list(links))]
+    responses = [("games", {"data": [category()]}),
+                 ("external_game_sources", [{"id": 1, "name": "GOG"}, {"id": 45, "name": "sTeAm"}]),
+                 ("external_games", list(links))]
+    if not links:
+        responses.append(("games", [{"id": 20, "websites": []}]))
+    return responses
 
 
 def matched_state(*appids):
@@ -149,11 +152,15 @@ def test_no_steam_link_is_not_a_not_steam_assertion_and_is_rechecked_after_twent
 
 @pytest.mark.parametrize("categories", [[], [category(igdb_id=None)]])
 def test_missing_twitch_or_igdb_identity_is_pending_without_steam_assertion(categories):
-    client = Client([("games", {"data": categories})])
+    responses = [("games", {"data": categories})]
+    if categories:
+        responses.extend([("external_game_sources", [{"id": 77, "name": "Twitch"}]),
+                          ("external_games", [])])
+    client = Client(responses)
     row = refresh_discoveries(client, tracking(), catalog(), now=NOW)["games"]["300"]
     assert row["status"] == "pending" and row["checked_at"] is None
     assert row["reason"] == "missing_twitch_igdb_identity" and row["steam_appids"] == []
-    assert len(client.calls) == 1
+    assert len(client.calls) == (3 if categories else 1)
 
 
 @pytest.mark.parametrize("stage", ["helix", "source", "external"])
@@ -165,7 +172,7 @@ def test_api_errors_have_no_new_checked_timestamp_or_secret_text(stage):
         responses = [("games", {"data": [category()]}), ("external_game_sources", secret)]
     else:
         responses = first_responses()
-        responses[-1] = ("external_games", secret)
+        responses[2] = ("external_games", secret)
     result = refresh_discoveries(Client(responses), tracking(), catalog(), now=NOW)
     row = result["games"]["300"]
     assert row["status"] == "unavailable" and row["checked_at"] is None and row["retry_at"] is None
@@ -173,19 +180,21 @@ def test_api_errors_have_no_new_checked_timestamp_or_secret_text(stage):
     assert "SECRET" not in json.dumps(result) and "Authorization" not in json.dumps(result)
 
 
-def test_failed_refresh_preserves_confirmed_link_and_identity_and_next_hour_retries():
+def test_fresh_conflicting_owner_invalidates_old_link_even_if_steam_lookup_fails_and_retries_next_hour():
     state = matched_state()
     client = Client([("games", {"data": [category(igdb_id=21)]}),
                      ("external_games", requests.ConnectionError("SECRET"))])
     later = NOW + timedelta(days=1)
     updated = refresh_discoveries(client, tracking(), catalog(100), state, later)
     row = updated["games"]["300"]
-    assert row["status"] == "matched" and row["igdb_id"] == "20"
-    assert row["steam_appids"] == ["100"] and row["links"] == state["games"]["300"]["links"]
-    assert row["checked_at"] == AT
+    assert row["status"] == "unavailable" and row["igdb_id"] is None
+    assert row["steam_appids"] == [] and row["links"] == []
+    assert not row.get("igdb_identity") and not row.get("related_steam_identity")
+    assert row["checked_at"] == "2026-10-03T09:00:00Z"
     client = Client([("games", {"data": [category(igdb_id=21)]}),
                      ("external_games", [external(101, igdb_id=21)])])
     updated = refresh_discoveries(client, tracking(), catalog(100), updated, later + timedelta(hours=1))
+    assert client.calls
     assert updated["games"]["300"]["steam_appids"] == ["101"]
     assert updated["games"]["300"]["missing_public_appids"] == ["101"]
 
