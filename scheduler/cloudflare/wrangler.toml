@@ -15,7 +15,7 @@ GITHUB_WORKFLOW_ID = "369223512"
 GITHUB_BRANCH = "main"
 FRONTEND_REPO = "game-trend-radar"
 # All workflows accept the controller slot; the runtime token permits all four repositories.
-RADAR_ENABLED_JOBS = "steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights"
+RADAR_ENABLED_JOBS = "steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights,nintendo_daily"
 
 # GITHUB_ACTIONS_TOKEN is a Cloudflare Secret, never a variable in this file.
 [observability]

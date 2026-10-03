@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import worker, { checkScheduledJobs, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS } from "../src/worker.mjs";
 
 const ENV = { GITHUB_ACTIONS_TOKEN: "offline-fixture-only",
-  RADAR_ENABLED_JOBS: "steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights" };
+  RADAR_ENABLED_JOBS: "steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights,nintendo_daily" };
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
 const epoch = (value) => Date.parse(value);
 const iso = (value) => new Date(epoch(value)).toISOString().replace(".000Z", "Z");
@@ -65,6 +65,8 @@ test("Taiwan midnight, year boundaries and daily times produce exact UTC minute 
     ["2026-10-03T01:15:00+08:00", "steam_growth", "2026-10-02T17:15:00Z"],
     ["2026-10-03T07:30:00+08:00", "steam_content", "2026-10-02T23:30:00Z"],
     ["2026-10-03T19:30:00+08:00", "steam_content", "2026-10-03T11:30:00Z"],
+    ["2026-10-03T08:30:00+08:00", "nintendo_daily", "2026-10-03T00:30:00Z"],
+    ["2027-01-01T08:30:00+08:00", "nintendo_daily", "2027-01-01T00:30:00Z"],
     ["2026-10-03T12:17:00+08:00", "frontend_insights", "2026-10-03T04:17:00Z"],
     ["2026-10-03T12:05:00+08:00", "twitch", "2026-10-03T04:00:00Z"],
   ]) assert.deepEqual(scheduledJobs(when), [{ job_id: id, target_slot: slot }]);
@@ -80,6 +82,64 @@ test("Followers catchup is due only at Taiwan 03 through 23 inclusive", () => {
   assert.deepEqual(scheduledJobs("2026-10-03T02:15:00+08:00"), []);
   assert.deepEqual(scheduledJobs("2026-10-03T12:30:00+08:00"), []);
   assert.deepEqual(scheduledJobs("2026-10-03T12:06:00+08:00"), []);
+});
+
+test("Nintendo is due once a day at Taiwan 08:30 without altering the other 30-minute jobs", () => {
+  for (let hour = 0; hour < 24; hour += 1) {
+    const due = scheduledJobs(`2026-10-03T${String(hour).padStart(2, "0")}:30:00+08:00`);
+    assert.equal(due.some((item) => item.job_id === "nintendo_daily"), hour === 8);
+    assert.equal(due.some((item) => item.job_id === "steam_content"), [7, 19].includes(hour));
+  }
+  for (const minute of [0, 5, 15, 17, 29, 31]) {
+    assert.ok(!scheduledJobs(`2026-10-03T08:${String(minute).padStart(2, "0")}:00+08:00`)
+      .some((item) => item.job_id === "nintendo_daily"));
+  }
+});
+
+test("Nintendo remains staged when the enable list has only the existing jobs", async () => {
+  const api = fixture();
+  const [result] = await check(api, "2026-10-04T08:30:00+08:00", {
+    ...ENV, RADAR_ENABLED_JOBS: "steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights",
+  });
+  assert.equal(result.job_id, "nintendo_daily");
+  assert.equal(result.reason, "job_staged");
+  assert.equal(api.requests.length, 0);
+});
+
+test("Nintendo uses its own workflow and consumes an already completed daily slot", async () => {
+  const when = "2026-10-17T08:30:00+08:00";
+  const api = fixture({ runs: [run(iso(when))], activeWorkflows: {
+    "369223512": { in_progress: [run("2026-10-17T00:00:00Z", { status: "in_progress" })] },
+  } });
+  const [result] = await check(api, when);
+  assert.equal(result.reason, "slot_completed");
+  assert.equal(api.posts().length, 0);
+  assert.ok(api.requests.every(({ url }) => url.pathname.includes("/collect-nintendo.yml/")));
+});
+
+test("Nintendo active runs wait, while an unrelated Twitch collection does not block Nintendo", async () => {
+  const busy = fixture({ activeWorkflows: {
+    "collect-nintendo.yml": { waiting: [run("2026-10-18T00:00:00Z", { status: "waiting" })] },
+  } });
+  assert.equal((await check(busy, "2026-10-18T08:30:00+08:00"))[0].reason, "workflow_active");
+  assert.equal(busy.posts().length, 0);
+  const independent = fixture({ activeWorkflows: {
+    "369223512": { in_progress: [run("2026-10-19T00:00:00Z", { status: "in_progress" })] },
+  } });
+  assert.equal((await check(independent, "2026-10-19T08:30:00+08:00"))[0].action, "dispatch");
+  assert.equal(independent.posts().length, 1);
+});
+
+test("Nintendo delayed delivery preserves its daily slot and never crosses the Taiwan date", async () => {
+  const planned = "2026-10-20T08:30:00+08:00";
+  const api = fixture();
+  const [result] = await check(api, "2026-10-20T09:02:00+08:00", ENV, planned);
+  assert.equal(result.action, "dispatch");
+  assert.equal(result.target_slot, "2026-10-20T00:30:00Z");
+  assert.equal(JSON.parse(api.posts()[0].options.body).inputs.target_slot, result.target_slot);
+  const stale = fixture();
+  assert.equal((await check(stale, "2026-10-21T00:01:00+08:00", ENV, planned))[0].reason, "stale_cron_delivery");
+  assert.equal(stale.requests.length, 0);
 });
 
 test("all new jobs remain staged without an explicit allowlisted enable list", async () => {
@@ -104,6 +164,7 @@ test("each enabled job sends only its fixed destination and exact due slot input
     ["2026-10-05T03:00:00+08:00", "steam_catchup"],
     ["2026-10-05T01:15:00+08:00", "steam_growth"],
     ["2026-10-05T07:30:00+08:00", "steam_content"],
+    ["2026-10-05T08:30:00+08:00", "nintendo_daily"],
     ["2026-10-05T12:17:00+08:00", "frontend_insights"],
   ]) {
     const api = fixture();
