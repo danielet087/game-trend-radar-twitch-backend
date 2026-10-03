@@ -1,19 +1,12 @@
 # Must match the existing Worker connected to this repository in Cloudflare Builds.
 name = "game-trend-radar-twitch-backend"
-main = "src/entry.mjs"
+main = "src/worker.mjs"
 compatibility_date = "2026-09-29"
 workers_dev = false
 preview_urls = false
 
 [triggers]
 crons = ["0,5,15,17,30 * * * *"]
-
-# Stage the daily Workflow binding before changing the active Cron triggers.
-# Its independent schedule is enabled only after Cloudflare accepts this binding.
-[[workflows]]
-name = "game-trend-radar-steam-daily-scheduler"
-binding = "STEAM_DAILY_SCHEDULE"
-class_name = "SteamDailyScheduler"
 
 [vars]
 GITHUB_OWNER = "danielet087"

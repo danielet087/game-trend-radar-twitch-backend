@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { checkScheduledJobs, jobForCron, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS } from "../src/worker.mjs";
+import worker, { checkScheduledJobs, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS } from "../src/worker.mjs";
 
 const ENV = { GITHUB_ACTIONS_TOKEN: "offline-fixture-only",
   RADAR_ENABLED_JOBS: "steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights" };
@@ -80,39 +80,6 @@ test("Followers catchup is due only at Taiwan 03 through 23 inclusive", () => {
   assert.deepEqual(scheduledJobs("2026-10-03T02:15:00+08:00"), []);
   assert.deepEqual(scheduledJobs("2026-10-03T12:30:00+08:00"), []);
   assert.deepEqual(scheduledJobs("2026-10-03T12:06:00+08:00"), []);
-});
-
-test("each independent cron selects exactly its own allowlisted job", async () => {
-  for (const [cron, when, id] of [
-    ["5 * * * *", "2026-11-01T12:05:00+08:00", "twitch"],
-    ["0 16 * * *", "2026-11-01T00:00:00+08:00", "steam_daily"],
-    ["0 0-15,19-23 * * *", "2026-11-01T03:00:00+08:00", "steam_catchup"],
-    ["15 17 * * *", "2026-11-01T01:15:00+08:00", "steam_growth"],
-    ["30 11,23 * * *", "2026-11-01T19:30:00+08:00", "steam_content"],
-    ["17 * * * *", "2026-11-01T12:17:00+08:00", "frontend_insights"],
-  ]) {
-    assert.equal(jobForCron(cron), id);
-    const api = fixture();
-    const results = await checkScheduledJobs(ENV, { now: epoch(when), scheduledTime: epoch(when),
-      jobId: jobForCron(cron), fetchImpl: api.fetchImpl });
-    assert.equal(results.length, 1);
-    assert.equal(results[0].job_id, id);
-    assert.equal(results[0].action, "dispatch");
-    assert.equal(api.posts().length, 1);
-  }
-});
-
-test("unknown jobs and a different job's due minute cannot dispatch", async () => {
-  const api = fixture();
-  const now = epoch("2026-11-02T00:00:00+08:00");
-  for (const jobId of ["unknown", "steam_daily/dispatch", null, {}, ["steam_daily"]]) {
-    const [result] = await checkScheduledJobs(ENV, { now, jobId, fetchImpl: api.fetchImpl });
-    assert.equal(result.reason, "unknown_scheduled_job");
-  }
-  assert.equal((await checkScheduledJobs(ENV, { now, jobId: "steam_catchup", fetchImpl: api.fetchImpl }))[0].reason, "no_job_due");
-  assert.equal(jobForCron("0,5,15,17,30 * * * *"), undefined);
-  assert.equal(jobForCron("arbitrary cron"), undefined);
-  assert.equal(api.requests.length, 0);
 });
 
 test("all new jobs remain staged without an explicit allowlisted enable list", async () => {

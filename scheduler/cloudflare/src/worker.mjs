@@ -251,21 +251,19 @@ export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetc
 // An absent or empty list retains the Twitch-only monitor for rollback.
 // Destinations cannot be configured by callers or redirected by an API response.
 export const SCHEDULE_JOBS = Object.freeze([
-  { id: "twitch", repo: "game-trend-radar-twitch-backend", workflow: "369223512", enabled: true, minute: 5,
-    cron: "5 * * * *" },
+  { id: "twitch", repo: "game-trend-radar-twitch-backend", workflow: "369223512", enabled: true, minute: 5 },
   { id: "steam_daily", repo: "game-trend-radar-backend", workflow: "steam-two-phase.yml", enabled: false,
-    minute: 0, taipeiHours: [0], cron: "0 16 * * *", inputs: { refresh_today: "true" } },
+    minute: 0, taipeiHours: [0], inputs: { refresh_today: "true" } },
   { id: "steam_catchup", repo: "game-trend-radar-backend", workflow: "steam-official-daily-catchup-250.yml", enabled: false,
-    minute: 0, taipeiHours: Array.from({ length: 21 }, (_, index) => index + 3), cron: "0 0-15,19-23 * * *",
+    minute: 0, taipeiHours: Array.from({ length: 21 }, (_, index) => index + 3),
     blockingWorkflows: ["steam-public-growth.yml", "steam-two-phase.yml", "steam-official-backlog-oneoff-20260923.yml",
       "steam-official-nearfirst-batch-once.yml", "steam-official-hour-stress-once.yml"] },
   { id: "steam_growth", repo: "game-trend-radar-backend", workflow: "steam-public-growth.yml", enabled: false,
-    minute: 15, taipeiHours: [1], cron: "15 17 * * *", blockingWorkflows: ["steam-official-daily-catchup-250.yml", "steam-official-backlog-oneoff-20260923.yml",
+    minute: 15, taipeiHours: [1], blockingWorkflows: ["steam-official-daily-catchup-250.yml", "steam-official-backlog-oneoff-20260923.yml",
       "steam-official-nearfirst-batch-once.yml", "steam-official-hour-stress-once.yml"] },
   { id: "steam_content", repo: "game-trend-radar-content-backend", workflow: "steam-catalog-reconcile.yml", enabled: false,
-    minute: 30, taipeiHours: [7, 19], cron: "30 11,23 * * *" },
-  { id: "frontend_insights", repo: "game-trend-radar", workflow: "radar-insights.yml", enabled: false, minute: 17,
-    cron: "17 * * * *" },
+    minute: 30, taipeiHours: [7, 19] },
+  { id: "frontend_insights", repo: "game-trend-radar", workflow: "radar-insights.yml", enabled: false, minute: 17 },
 ].map((job) => Object.freeze({ ...job,
   ...(job.taipeiHours ? { taipeiHours: Object.freeze(job.taipeiHours) } : {}),
   ...(job.blockingWorkflows ? { blockingWorkflows: Object.freeze(job.blockingWorkflows) } : {}),
@@ -293,10 +291,6 @@ export function scheduledJobs(time) {
   return SCHEDULE_JOBS.filter((job) => job.minute === minute &&
     (!job.taipeiHours || job.taipeiHours.includes(taipeiHour)))
     .map((job) => ({ job_id: job.id, target_slot: job.id === "twitch" ? hourSlot(epoch) : minuteSlot(epoch) }));
-}
-
-export function jobForCron(cron) {
-  return SCHEDULE_JOBS.find((job) => job.cron === cron)?.id;
 }
 
 function enabledJobIds(env) {
@@ -387,11 +381,8 @@ async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
 }
 
 export async function checkScheduledJobs(env, {
-  now = Date.now(), scheduledTime = now, fetchImpl = fetch, jobId,
+  now = Date.now(), scheduledTime = now, fetchImpl = fetch,
 } = {}) {
-  if (jobId !== undefined && !SCHEDULE_JOBS.some((job) => job.id === jobId)) {
-    return [{ action: "blocked", reason: "unknown_scheduled_job" }];
-  }
   const epoch = clockEpoch(now);
   const scheduledEpoch = clockEpoch(scheduledTime);
   if (scheduledEpoch > epoch + CLOCK_TOLERANCE_MS) {
@@ -401,8 +392,8 @@ export async function checkScheduledJobs(env, {
   // Select only the original Cron minute's jobs, even when delivery is a little
   // late. Hourly observations cannot cross an hour; daily tasks cannot cross
   // their Taiwan date. Preserve the original due instant in workflow inputs.
-  const due = scheduledJobs(scheduledEpoch).filter((job) => jobId === undefined || job.job_id === jobId);
-  if (!due.length) return [{ ...(jobId ? { job_id: jobId } : {}), action: "skip", reason: "no_job_due" }];
+  const due = scheduledJobs(scheduledEpoch);
+  if (!due.length) return [{ action: "skip", reason: "no_job_due" }];
   const enabled = enabledJobIds(env);
   let settings;
   try { settings = schedulerConfig(env); }
@@ -459,14 +450,7 @@ export default {
     let results;
     try {
       const now = Date.now();
-      const jobId = jobForCron(controller?.cron);
-      // Keep the currently deployed union trigger working during the staged
-      // Workflow binding deployment. The final cutover removes this branch.
-      if (!jobId && controller?.cron !== "0,5,15,17,30 * * * *") {
-        results = [{ action: "blocked", reason: "unknown_cron_trigger" }];
-      } else {
-        results = await checkScheduledJobs(env, { now, scheduledTime: controller?.scheduledTime ?? now, jobId });
-      }
+      results = await checkScheduledJobs(env, { now, scheduledTime: controller?.scheduledTime ?? now });
     } catch (error) {
       results = [{ action: "blocked", reason: safeReason(error) }];
     }
