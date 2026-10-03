@@ -33,7 +33,7 @@
 
 `data/twitch_tracking.json`（前端儲存庫）保存首次收錄、收錄依據、最後觀測與各來源期限。Twitch 熱門新作入口須同時達觀眾門檻及有新作證據：有效官方全新觀測、Twitch 日期推算命中或 IGDB 30 天命中；只有人氣、沒有新作證據的未知候選不會自動加入。Steam 入口使用既有公開清單、確認的 ID 對照與 Steam 該版本上市日，上市後未滿 30 天即加入，不受 Twitch 觀眾門檻或 IGDB 全球首發日期影響。
 
-每款類別的 `tracking_sources` 分別保存 `twitch_new` 與 `steam:<appid>`，任一來源有效便保留觀測。Twitch 來源沿用其發售資料；Steam 來源優先採 Steam 已保存的 UTC 精確時間，依台灣上市日核對，缺少精確時間時採確切台灣日期的零時。Steam 補充資訊的 `release_time_basis` 分別標示 `exact_utc` 或 `taipei_date_midnight`，避免將日期備援解讀成精確發售時刻。尚未上市、日期模糊或衝突的 Steam 項目不加入近期上市觀測。來源到期後保留紀錄，不刪除歷史。
+每款類別的 `tracking_sources` 分別保存 `twitch_new` 與 `steam:<appid>`，任一來源有效便保留觀測。Twitch 來源沿用其發售資料；Steam 來源優先採 Steam 已保存的 UTC 精確時間，依台灣上市日核對，缺少精確時間時採確切台灣日期的零時。Steam 補充資訊的 `release_time_basis` 分別標示 `exact_utc` 或 `taipei_date_midnight`，避免將日期備援解讀成精確發售時刻。已經 Steam 後端正式接受的 Twitch 來源若保存完整台灣商店日期權威證據、商品／成人內容／Followers 驗證，則沿用該台灣顯示日零時，標示 `steam_taiwan_store_date_authoritative` 並保留原 UTC 日期衝突診斷。其餘日期衝突、模糊日期與尚未上市的 Steam 項目仍不加入近期上市觀測。來源到期後保留紀錄，不刪除歷史。
 
 ### Steam 與 Twitch 對照
 
@@ -44,6 +44,8 @@ Twitch 新作也會反向補漏 Steam 清單。已正式收錄的 `twitch_new` �
 從 Steam AppID 查 IGDB `external_games` 的 Steam 外部 ID，再以 IGDB game ID 批次查 Helix `Get Games`，得到 Twitch 類別 ID。Steam 外部來源 ID 由 `external_game_sources` 查詢，不沿用已棄用的 `category` 寫法。匹配成功的 ID 快取；未找到或多個候選分別保存待配對狀態，按重試期限補查，不將名稱相似當作確認配對。
 
 `data/twitch_steam_mapping.json` 保存 ID 對照、配對依據與 Steam 補充資訊。名稱、TAG、關注度、Steam 商店連結及上市資訊可補充至 Twitch 觀測；圖片始終使用 Twitch `box_art_url`。尚未找到 Twitch 類別的 Steam 遊戲保持待配對，未量測人數為空值。Twitch 類別數據涵蓋該類別的直播，不表示每位主播使用 Steam 版；對應也不代表已確認官方「全新」標記。
+
+當已確認的反向 Steam 身分後來加入公開清單，收集器會驗證同一款目前有效的 Twitch 收錄與 IGDB／Steam 外部 ID 鏈，直接沿用至名稱對照，不重新查詢已知鏈。中文名稱與商品資訊不受 Steam 近期上市 30 天入口限制；超過 30 天仍可替有效 Twitch 新作顯示名稱，但不延長 Steam 近期來源。相衝突的已確認身分、多個反向候選及較新的正式配對判定不會被快取覆寫。
 
 收錄後保留至 `release_at + 30 × 24 小時`。未知日期不以首次收錄日代替發售日，保留追蹤待確認；暫時無法查日期時沿用已確認的發售日判斷退出。非遊戲分類仍排除。只有直播分頁完整且實際查無開台時，當輪總觀眾與開台數才記 0；查詢失敗或未量測時保留缺測。
 
@@ -191,6 +193,15 @@ python -m scripts.update_twitch --tracking-state output/twitch_tracking_input.js
   --steam-mapping output/twitch_steam_mapping_input.json \
   --output output/twitch_live.json
 ```
+
+若只需將最新公開 Steam 名稱補到已有 Twitch 觀測，可在一致版本的前端本機副本執行：
+
+```bash
+python -m scripts.reconcile_steam_metadata --frontend-dir /path/to/frontend --dry-run
+python -m scripts.reconcile_steam_metadata --frontend-dir /path/to/frontend
+```
+
+此命令不建立 API client，也不讀憑證；僅沿用正式確認的身分鏈。它更新 latest、追蹤名單與 ID 對照的 Steam metadata，保留原 Twitch 名稱、實際量測時間、觀眾數、排程紀錄、逐時歷史與收集成功 receipt。新加入的 Steam 近期來源若尚未量測，只建立名單項目，等待既有收集流程取得真實數值。
 
 | 參數 | 預設 | 用途 |
 |---|---|---|

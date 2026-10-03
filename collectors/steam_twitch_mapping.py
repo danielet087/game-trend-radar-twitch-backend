@@ -18,6 +18,9 @@ from urllib3.util import Timeout
 
 from collectors.twitch_live import CollectionDeadlineExceeded
 from collectors.twitch_newness import parse_timestamp, timestamp
+from collectors.twitch_steam_admission import (
+    TW_STORE_DATE_AUTHORITY, has_taiwan_store_date_authority, is_twitch_qualified,
+)
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 METHOD = "steam_appid_igdb_external_games_helix_igdb_id"
@@ -105,20 +108,26 @@ def normalize_steam_catalog(payload: dict, now: datetime) -> list[dict]:
             raise ValueError("Duplicate Steam catalog AppID")
         seen.add(appid)
         start, end = row.get("release_start"), row.get("release_end")
+        taiwan_authority = has_taiwan_store_date_authority(row) and is_twitch_qualified(row)
         if (row.get("release_precision") != "day" or not isinstance(start, str)
-                or not DAY.fullmatch(start) or start != end or row.get("release_date_conflict") is True
+                or not DAY.fullmatch(start) or start != end
+                or row.get("release_date_conflict") is True and not taiwan_authority
                 or row.get("release_date_timezone", "Asia/Taipei") != "Asia/Taipei"):
             continue
         try:
             release_day = date.fromisoformat(start)
             if row.get("release_time_utc"):
                 release = parse_timestamp(row["release_time_utc"])
-                if release.astimezone(TAIPEI).date() != release_day:
+                if release.astimezone(TAIPEI).date() != release_day and not taiwan_authority:
                     continue
             else:
                 release = datetime.combine(release_day, datetime.min.time(), TAIPEI).astimezone(timezone.utc)
-            if row.get("release_timestamp_taipei_date", start) != start:
+            if row.get("release_timestamp_taipei_date", start) != start and not taiwan_authority:
                 continue
+            if taiwan_authority:
+                # The verified TW store day governs the release window. Keep
+                # the other official timestamp below as diagnostic evidence.
+                release = datetime.combine(release_day, datetime.min.time(), TAIPEI).astimezone(timezone.utc)
         except (ValueError, TypeError, OverflowError):
             continue
         name = row.get("name")
@@ -136,11 +145,16 @@ def normalize_steam_catalog(payload: dict, now: datetime) -> list[dict]:
             "store_url": f"https://store.steampowered.com/app/{appid}/", "followers": followers,
             "release_at": timestamp(release), "release_date": start, "release_date_timezone": "Asia/Taipei",
             "release_precision": "day",
-            "release_time_basis": "exact_utc" if row.get("release_time_utc") else "taipei_date_midnight",
+            "release_time_basis": TW_STORE_DATE_AUTHORITY if taiwan_authority else (
+                "exact_utc" if row.get("release_time_utc") else "taipei_date_midnight"),
             "is_recent": release <= clock < expires, "expires_at": timestamp(expires),
             "tags": tags, "genres": genres,
             "tag_labels_zh_tw": _labels(row.get("tag_labels_zh_tw"), tags),
             "genre_labels_zh_tw": _labels(row.get("genre_labels_zh_tw"), genres),
+            **({key: deepcopy(row.get(key)) for key in (
+                "release_time_utc", "release_timestamp_taipei_date", "release_date_conflict", "release_store_date",
+                "release_date_normalization", "release_display_provider", "release_date_verified_at",
+            )} if taiwan_authority else {}),
         })
     return result
 
@@ -197,9 +211,78 @@ def _error(exc: Exception) -> str:
     return f"HTTP {status}" if type(status) is int else type(exc).__name__
 
 
+def _reuse_discovery_mappings(state: dict, catalog: list[dict], discovery_state: dict | None,
+                             tracking_state: dict | None, clock: datetime) -> set[str]:
+    """Reuse the same validated official ID chain without another API lookup.
+
+    Reverse intake may know a link before the game enters the curated catalog.
+    Only its current, qualified Twitch membership and a unique AppID identity
+    can seed a forward cache. A conflicting or newer forward decision wins.
+    """
+    if discovery_state is None or tracking_state is None:
+        return set()
+    # Local imports avoid the discovery module's shared mapping-helper import.
+    from collectors.twitch_steam_discovery import NON_GAME_IDS, _qualified_members, normalize_discovery_state
+    from collectors.twitch_tracking import normalize_tracking_state
+
+    discovery = normalize_discovery_state(discovery_state)
+    tracking = normalize_tracking_state(tracking_state, clock, non_game_ids=NON_GAME_IDS)
+    qualified = _qualified_members(tracking, clock)
+    source = discovery.get("steam_source_id")
+    if not source or state.get("steam_source_id") not in (None, source):
+        return set()
+    public_ids = {steam["steam_appid"] for steam in catalog}
+    candidates: dict[str, dict[tuple[str, str], tuple[dict, dict]]] = {}
+    for twitch_id, row in discovery["games"].items():
+        if (twitch_id not in qualified or row.get("active") is not True or row.get("status") != "matched"
+                or parse_timestamp(row["checked_at"]) > clock or parse_timestamp(row["updated_at"]) > clock):
+            continue
+        entry, enrollment = qualified[twitch_id]
+        current_igdb = entry.get("igdb_id") or (entry.get("last_observation") or {}).get("igdb_id")
+        try:
+            same_igdb = _id(current_igdb) == row["igdb_id"]
+        except (ValueError, TypeError):
+            same_igdb = False
+        if not same_igdb or row["twitch_enrollment"] != enrollment:
+            continue
+        for appid in set(row["steam_appids"]) & public_ids:
+            candidates.setdefault(appid, {})[(twitch_id, row["igdb_id"])] = (row, entry)
+
+    reused = set()
+    for appid, identities in candidates.items():
+        if len(identities) != 1:
+            continue
+        (twitch_id, igdb_id), (row, entry) = next(iter(identities.items()))
+        previous = state["games"].get(appid)
+        if previous is not None:
+            # Confirmed and ambiguous forward identities require their own
+            # authoritative refresh; reverse metadata cannot replace them.
+            if previous.get("status") in {"matched", "ambiguous"}:
+                continue
+            if (previous.get("checked_at") and
+                    parse_timestamp(previous["checked_at"]) >= parse_timestamp(row["checked_at"])):
+                continue
+        cached = state["games"].setdefault(appid, {"steam_appid": appid})
+        for key in ("candidates",):
+            cached.pop(key, None)
+        cached.update(
+            status="matched", method=METHOD, igdb_id=igdb_id, twitch_game_id=twitch_id,
+            twitch_name=row["twitch_name"], box_art_url=entry.get("box_art_url"),
+            checked_at=row["checked_at"], retry_at=None, reason="authoritative_id_chain",
+            identity_source=row["method"], discovery_source_updated_at=discovery.get("updated_at"),
+            discovery_links=deepcopy([link for link in row["links"] if link["steam_appid"] == appid]),
+        )
+        reused.add(appid)
+    if reused:
+        state["steam_source_id"] = source
+    return reused
+
+
 def refresh_mappings(client, catalog: dict | list[dict], mapping_state: dict | None = None,
                      now: datetime | None = None, *, deadline: float | None = None,
-                     monotonic: Callable[[], float] = time.monotonic) -> dict:
+                     monotonic: Callable[[], float] = time.monotonic,
+                     discovery_state: dict | None = None, tracking_state: dict | None = None,
+                     allow_lookup: bool = True) -> dict:
     """Refresh uncached links, preserving confirmed links during API outages.
 
     Unmatched/ambiguous links are retried daily. Confirmed IDs are reused while
@@ -210,6 +293,7 @@ def refresh_mappings(client, catalog: dict | list[dict], mapping_state: dict | N
     games = normalize_steam_catalog(catalog, clock) if isinstance(catalog, dict) else deepcopy(catalog)
     if not isinstance(games, list):
         raise ValueError("Steam catalog must be a catalog object or normalized list")
+    reused = _reuse_discovery_mappings(state, games, discovery_state, tracking_state, clock)
     seen, due = set(), []
     for steam in games:
         if not isinstance(steam, dict):
@@ -242,7 +326,7 @@ def refresh_mappings(client, catalog: dict | list[dict], mapping_state: dict | N
     errors = []
     failures = (requests.RequestException, ValueError, KeyError, TypeError, RuntimeError, OverflowError, OSError)
     source = state.get("steam_source_id")
-    if due and not source:
+    if allow_lookup and due and not source:
         try:
             sources = _pages(client, "external_game_sources", "fields id,name;", deadline, monotonic)
             ids = {_id(row.get("id")) for row in sources if isinstance(row.get("name"), str) and row["name"].strip().casefold() == "steam"}
@@ -251,7 +335,7 @@ def refresh_mappings(client, catalog: dict | list[dict], mapping_state: dict | N
             source = state["steam_source_id"] = ids.pop()
         except failures as exc:
             errors.append({"stage": "external_game_sources", "reason": _error(exc)})
-    if source:
+    if allow_lookup and source:
         for offset in range(0, len(due), 100):
             batch = due[offset:offset + 100]
             try:
@@ -318,6 +402,7 @@ def refresh_mappings(client, catalog: dict | list[dict], mapping_state: dict | N
             state["source_catalog"]["commit"] = commit
     counts = Counter(state["games"][appid]["status"] for appid in seen)
     state["report"] = {"status": "unavailable_or_partial" if errors else "ok", "catalog_count": len(games),
-        "recent_count": sum(row["is_recent"] for row in games), "lookup_count": len(due),
-        "counts": dict(counts), "errors": errors}
+        "recent_count": sum(row["is_recent"] for row in games), "lookup_count": len(due) if allow_lookup else 0,
+        "pending_lookup_count": len(due), "cached_discovery_mappings": len(reused),
+        "metadata_only": not allow_lookup, "counts": dict(counts), "errors": errors}
     return state

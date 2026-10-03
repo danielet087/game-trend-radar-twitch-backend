@@ -239,7 +239,8 @@ def collect_candidates(
     steam_matches_by_id = None
     if steam_catalog is not None:
         catalog = normalize_steam_catalog(steam_catalog, clock)
-        mappings = refresh_mappings(client, steam_catalog, mappings, clock, deadline=deadline, monotonic=monotonic)
+        mappings = refresh_mappings(client, steam_catalog, mappings, clock, deadline=deadline, monotonic=monotonic,
+                                    discovery_state=steam_discovery_state, tracking_state=tracking)
         reconcile_steam_catalog(tracking, catalog, mappings, clock, non_game_ids=NON_GAME_IDS)
         steam_by_appid = {steam["steam_appid"]: steam for steam in catalog}
         steam_matches_by_id = {}
