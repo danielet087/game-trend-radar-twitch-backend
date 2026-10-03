@@ -6,7 +6,7 @@ workers_dev = false
 preview_urls = false
 
 [triggers]
-crons = ["5 * * * *"]
+crons = ["0,5,15,17,30 * * * *"]
 
 [vars]
 GITHUB_OWNER = "danielet087"
@@ -14,9 +14,8 @@ GITHUB_REPO = "game-trend-radar-twitch-backend"
 GITHUB_WORKFLOW_ID = "369223512"
 GITHUB_BRANCH = "main"
 FRONTEND_REPO = "game-trend-radar"
-# Staging: new workflows stay disabled until all four repositories permit
-# Actions read/write and each workflow accepts the controller's slot inputs.
-RADAR_ENABLED_JOBS = ""
+# All workflows accept the controller slot; the runtime token permits all four repositories.
+RADAR_ENABLED_JOBS = "steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights"
 
 # GITHUB_ACTIONS_TOKEN is a Cloudflare Secret, never a variable in this file.
 [observability]
