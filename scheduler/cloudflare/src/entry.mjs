@@ -41,7 +41,7 @@ export class SteamDailyScheduler extends WorkflowEntrypoint {
       results = await step.do("dispatch-steam-daily-slot", {
         // GitHub may accept POST even if its response is lost. Preserve the
         // controller's one-attempt policy instead of Workflow automatic retries.
-        retries: { limit: 0 },
+        retries: { limit: 0, delay: "1 second", backoff: "constant" },
         timeout: "2 minutes",
       }, async () => checkScheduledJobs(this.env, {
         now: Date.now(),
