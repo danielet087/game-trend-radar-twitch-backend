@@ -3,6 +3,7 @@ run-name: "Nintendo catalog | slot=${{ inputs.target_slot || 'manual' }} | ${{ i
 
 # The Nintendo backend owns collection and validation. This credential host
 # reuses existing IGDB/publication secrets; Cloudflare supplies the daily slot.
+# Large candidate ledgers use compact JSON; public cards remain a small catalog.
 on:
   push:
     branches: [main]
