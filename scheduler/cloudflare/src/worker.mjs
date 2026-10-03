@@ -247,8 +247,8 @@ export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetc
   return { ...base, action: "dispatch", reason: "missing_published_collection", attempts: attemptCount + 1 };
 }
 
-// New jobs are opt-in. Until workflow inputs and token permissions are ready,
-// RADAR_ENABLED_JOBS is empty and the existing Twitch monitor is the only job.
+// New jobs are opt-in through RADAR_ENABLED_JOBS; production enables all five.
+// An absent or empty list retains the Twitch-only monitor for rollback.
 // Destinations cannot be configured by callers or redirected by an API response.
 export const SCHEDULE_JOBS = Object.freeze([
   { id: "twitch", repo: "game-trend-radar-twitch-backend", workflow: "369223512", enabled: true, minute: 5 },

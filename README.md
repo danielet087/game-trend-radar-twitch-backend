@@ -6,11 +6,11 @@
 
 2026-10-01 **16:44（台灣）** 的[部署收集](https://github.com/danielet087/game-trend-radar-twitch-backend/actions/runs/36837900593)已完成真實 API 查詢並發布，前端 Pages 部署亦成功。當次 106 款 Steam 清單有 104 款日期一致，102 款找到官方 ID 鏈對照；23 款近期上市中 22 款已配對、1 款待配對。既有 24 款 Twitch 追蹤全數保留，加上 Steam 來源後為 39 個類別（7 個來源重疊），當次全部篩選中位數查詢完整。這是該次快照的驗證數量，不是固定清單上限，也不代表官方「全新」標記已自動確認。
 
-2026-09-30 新增 [Cloudflare 每小時排程](scheduler/cloudflare/README.md)：每小時第 05 分檢查本小時是否已發布完整基礎量測，缺資料且沒有執行中的工作時才觸發既有 Python workflow。Cloudflare 每小時只檢查一次，不在同一小時每 5 分鐘重試；GitHub 原生第 17 分排程保留為備援。Cloudflare 程式與設定提交到 GitHub **不代表外部排程已啟用**，需先依部署說明設定 Worker 與 `GITHUB_ACTIONS_TOKEN`，再以 Cloudflare 日誌、Actions 的 `cloudflare` 執行名稱與發布 receipt 三者驗證。
+2026-10-03 起，六項定時工作統一由既有 [Cloudflare 排程控制器](scheduler/cloudflare/README.md) 觸發。Twitch 仍在每小時第 05 分檢查本小時是否已發布完整基礎量測，缺資料且沒有執行中的工作時才觸發既有 Python workflow。每日 Steam 發現、官方 Followers 補漏、成長追蹤、內容對帳與前端分析亦由同一 Worker 按原時間派發；六項 GitHub 原生 `schedule` 已移除。
 
-所有入口共用 workflow concurrency；工作開始後會解析前端最新 git HEAD，讀取該不可變版本的成功紀錄，再判斷是否需要收集。同一小時已有成功發布時直接略過；舊時段延遲排隊的外部請求略過，不回填歷史直播數。手動 Run workflow 預設也防重複，需要重新取樣時才勾選 `force`。原生 GitHub cron 留作備援。
+所有入口共用 workflow concurrency；工作開始後會解析前端最新 git HEAD，讀取該不可變版本的成功紀錄，再判斷是否需要收集。同一小時已有成功發布時直接略過；舊時段延遲排隊的外部請求略過，不回填歷史直播數。手動 Run workflow 預設也防重複，需要重新取樣時才勾選 `force`。
 
-**Cloudflare 設定於每小時 05 分觸發，GitHub Actions 於 17 分備援**（台灣時間，例如 11:05 與 11:17）。兩者的 cron 分別為 `5 * * * *` 與 `17 * * * *`；UTC 與台灣分鐘相同，不需另外平移小時。備援仍會檢查本小時回條，已發布就略過收集。排程可能延遲，因此資料保存實際收集與量測時間，不將延遲結果標成準點觀測。設定已提交不等於排程已觸發，實際狀態須看 Actions 的 `cloudflare` 名稱或 `schedule` 執行紀錄，不能以手動成功代替。
+**Twitch 每小時第 05 分由 Cloudflare 檢查一次**（台灣時間，例如 11:05），不在同一小時每 5 分鐘重試。統一 Worker 使用單一 Cron `0,5,15,17,30 * * * *`，其他分鐘只處理各自到期的工作，不增加 Twitch 查詢頻率。排程可能延遲，因此資料保存實際收集與量測時間，不將延遲結果標成準點觀測。以 Cloudflare 部署狀態、Actions 的 `cloudflare` 執行名稱及發布 receipt 核對實際結果，不能以手動成功代替定時觸發驗證。
 
 仍可到 Actions → Collect Twitch live data → Run workflow 手動執行。同一時間只允許一個收集／發布工作，不取消正在執行的工作。Steam 對應模組更新的 push 會啟動一次部署驗證收集；此入口與每小時排程使用同一份 workflow、concurrency 與發布回條，不是額外的週期排程。Test standalone collector 的一般 push CI 只跑離線測試，不查 API、不發布資料。
 
@@ -168,7 +168,7 @@ Workflow artifact 的 `retention-days: 2` 僅是尚待發布結果的短期備�
 | `TWITCH_CLIENT_SECRET` | 取得 Twitch app access token |
 | `FRONTEND_REPO_TOKEN` | 寫入 `danielet087/game-trend-radar`；fine-grained token 僅選前端 Repo，Contents: Read and write |
 
-Python 收集工作沿用上述三個 Secrets。Cloudflare Worker 額外需要其自身的 `GITHUB_ACTIONS_TOKEN` Secret，只選 Twitch 後端 Repo，Actions: Read and write；不可把此值放入程式或公開變數。Twitch 憑證與前端寫入 Token 留在 GitHub。IGDB 無法使用時仍可收集 Twitch 指標；內建 `GITHUB_TOKEN` 不能取代跨 Repo 的 `FRONTEND_REPO_TOKEN`。
+Python 收集工作沿用上述三個 Secrets。Cloudflare Worker 額外需要其自身的 `GITHUB_ACTIONS_TOKEN` Secret，限定 Twitch 後端、Steam 主後端、內容後端及前端四個 Repo，Actions: Read and write；不可把此值放入程式或公開變數。修改既有 Token 權限不會更換 Token 值；只有新建或重新產生 Token 才須替換 Cloudflare Secret。Twitch 憑證與前端寫入 Token 留在 GitHub。IGDB 無法使用時仍可收集 Twitch 指標；內建 `GITHUB_TOKEN` 不能取代跨 Repo 的 `FRONTEND_REPO_TOKEN`。
 
 缺少收集或發布憑證時 workflow 明確失敗，不宣稱已更新。收集成功後先保存 2 天的 JSON artifact；若發布失敗，最新資料與成功紀錄不前進，可據實辨識尚未完成。
 

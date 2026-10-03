@@ -1,8 +1,8 @@
 name: Collect Twitch live data
 run-name: "Collect Twitch | slot=${{ inputs.target_slot || 'automatic' }} | ${{ inputs.trigger_source || github.event_name }}"
 
-# Run at minute 17 of every hour (also :17 in Asia/Taipei, UTC+8).
-# GitHub may delay scheduled starts; saved data keeps actual measurement times.
+# Cloudflare dispatches at minute 05 of every hour; there is no native cron.
+# Delayed starts keep actual measurement times.
 # CI tests run separately and do not call the live API.
 on:
   # Bootstrap a mapping-module deployment once using the regular collection
@@ -12,8 +12,6 @@ on:
     paths:
       - 'collectors/steam_twitch_mapping.py'
       - 'collectors/twitch_steam_discovery.py'
-  schedule:
-    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       target_slot:

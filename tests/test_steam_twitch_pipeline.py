@@ -152,8 +152,8 @@ def test_mapping_and_sources_are_archived_with_real_observation_and_receipt(tmp_
 
 def test_production_workflow_loads_dual_inputs_and_module_push_bootstraps_only():
     text = (Path(__file__).resolve().parents[1] / ".github/workflows/collect.yml").read_text()
-    assert re.findall(r"cron:\s*'([^']+)'", text) == ["17 * * * *"]
-    assert re.search(r"\n  push:\n    branches: \[main\]\n    paths:\n      - 'collectors/steam_twitch_mapping.py'\n      - 'collectors/twitch_steam_discovery.py'\n  schedule:", text)
+    assert not re.search(r"^  schedule:", text, re.MULTILINE)
+    assert re.search(r"\n  push:\n    branches: \[main\]\n    paths:\n      - 'collectors/steam_twitch_mapping.py'\n      - 'collectors/twitch_steam_discovery.py'\n  workflow_dispatch:", text)
     load = next(line for line in text.splitlines() if "run: python -m scripts.load_twitch_tracking" in line)
     collect = next(line for line in text.splitlines() if "run: python -m scripts.update_twitch" in line)
     assert "--steam-output output/steam_catalog_input.json" in load

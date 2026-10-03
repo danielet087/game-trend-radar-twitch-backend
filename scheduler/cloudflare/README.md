@@ -1,8 +1,8 @@
 # Game Trend Radar 排程控制器（Cloudflare Workers）
 
-目前維持每小時第 05 分檢查 Twitch 收集工作（Cron：`5 * * * *`），缺少當小時資料時才觸發收集。其餘五種工作已準備好但預設停用，`RADAR_ENABLED_JOBS` 為空字串；在權限與 workflow 輸入完成前，不會觸發新的工作。Python 仍在 GitHub Actions 執行，Worker 只查狀態與觸發 workflow，不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
+六項定時工作統一由既有 Cloudflare Worker 觸發，使用單一 Cron `0,5,15,17,30 * * * *`，每天 120 個 tick。每次只檢查原定 Cron 分鐘到期的工作：Twitch 每小時第 05 分檢查當小時是否缺少資料，其餘工作依下表執行。Python 與資料發布繼續在 GitHub Actions 執行；Worker 只查狀態與派發 workflow，不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
 
-## 全部排程切換準備
+## 正式排程與設定
 
 統一控制器限定 `danielet087`、`main` 與下列目的 workflow，不能透過環境變數指定其他儲存庫。既有 Twitch 回條驗證、每日資料與收集前 guard 維持原邏輯。
 
@@ -15,34 +15,37 @@
 | `steam_content` | 每日 07:30、19:30 | `game-trend-radar-content-backend` | `steam-catalog-reconcile.yml` | — |
 | `frontend_insights` | 每小時第 17 分 | `game-trend-radar` | `radar-insights.yml` | — |
 
-五個新 workflow 必須接受 `target_slot` 與 `trigger_source=cloudflare`；`target_slot` 使用原定到期時刻的 UTC ISO 字串，包含分鐘，並且 `run-name` 須含獨立 `slot=<同一時刻>` 欄位。例如 `Steam growth | slot=2026-10-02T17:15:00Z | cloudflare`。Twitch 仍使用 UTC 整點小時作為 slot。
+Twitch 以外的五個 workflow 接受 `target_slot` 與 `trigger_source=cloudflare`；`target_slot` 使用原定到期時刻的 UTC ISO 字串，包含分鐘，並且 `run-name` 須含獨立 `slot=<同一時刻>` 欄位。例如 `Steam growth | slot=2026-10-02T17:15:00Z | cloudflare`。Twitch 仍使用 UTC 整點小時作為 slot。
 
-尚待完成的設定：
+正式設定如下，`wrangler.toml` 是 Git 連接及 CLI 部署時的設定來源：
 
-1. 先確認四個儲存庫的 workflow 都已支援上述輸入、run-name、既有 concurrency，以及在真正修改資料前的 slot guard。每日刷新尤其須避免重複 slot 再次重設進度。
-2. 將既有 GitHub fine-grained token 的 Repository access 擴充至 **`game-trend-radar-twitch-backend`、`game-trend-radar-backend`、`game-trend-radar-content-backend`、`game-trend-radar` 四個儲存庫**，Repository permissions 的 **Actions → Read and write**。控制器不需要 Contents write；資料發布仍由 GitHub 既有 Secrets 處理。將更新後 token 套用到現有 Cloudflare Secret `GITHUB_ACTIONS_TOKEN`，不要提交或公開 token。
-3. 可使用 `probeSchedulerPermissions(env)` 做 read-only 檢查：它只 GET 固定 workflow，對每個目的回報讀取結果，完全不 dispatch。GET 成功只能確認 Actions 讀取與 workflow 存在，**不能證明 Actions write 權限**；實際派發被拒絕時仍會以 403 停止該工作，不會改派其他目的地。
-4. 權限與 workflow 就緒後，將 `RADAR_ENABLED_JOBS` 設為 `steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights`，將 `[triggers]` 改為單一 Cron `crons = ["0,5,15,17,30 * * * *"]`。目前 staging 設定檔刻意保留空的 enable 清單與原本 `5 * * * *`，不可只更新 Cron 就宣稱全部工作已切換。
-5. 正式切換時停用這六種工作的 GitHub 原生 `schedule`，保留 `workflow_dispatch` 與必要的 push/CI 入口；不要讓兩套定時來源長期重複觸發，也不恢復舊的一次性手動工作排程。對照 Cloudflare 日誌與每個 workflow 的 slot 執行紀錄確認切換結果。
+- `RADAR_ENABLED_JOBS = "steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights"`；Twitch 保持內建啟用。
+- `crons = ["0,5,15,17,30 * * * *"]`，只保留這一個 Cron。
+- 四個儲存庫的 workflow 已支援相應輸入、run-name 與既有 concurrency。每日刷新在真正重設進度前檢查 slot，避免相同時段重複重設。
+- 六種工作的 GitHub 原生 `schedule` 已停用，保留 `workflow_dispatch` 與必要的 push/CI 入口；不恢復舊的一次性手動工作排程。Cloudflare 派發後仍需對照 Actions 與資料發布結果，不能只憑 Cron 存在判定收集成功。
 
-單一最終 Cron 每天產生 120 個 tick，每次只查原定 Cron 分鐘到期的工作，Twitch 不會因 00、15、17、30 分的 tick 額外重試。延遲到同一小時內的 Twitch、Followers 補漏與前端分析仍可執行；跨小時則略過，避免補造舊時段觀测。每日刷新、成長與內容工作僅接受原定台灣日期內的延遲，不跨日補跑。傳入 workflow 的 slot 始終是原定到期時刻；Twitch 收集仍記錄實際量測時間。
+控制器需要 GitHub fine-grained PAT，Resource owner 為 **`danielet087`**，Repository access 選擇 **`game-trend-radar-twitch-backend`、`game-trend-radar-backend`、`game-trend-radar-content-backend`、`game-trend-radar` 四個儲存庫**，Repository permissions 設為 **Actions → Read and write**。控制器不需要 Contents write；資料發布仍由 GitHub 既有 Secrets 處理。
 
-新工作會分別查五種 active 狀態，再分頁檢查最近執行紀錄。找到同 slot 的成功 run 就略過；同 slot 已失敗、取消或略過也不自動重送，避免每日 reset 被重複執行。成長／Followers 另查同 concurrency 群組的已知工作；Followers 也等待每日發現工作完成，避免新派發替換另一條流程已排隊的工作。三個相關手動一次性 workflow 僅列為 active blockers，不列入排程或 dispatch 清單。
+**只修改同一個 PAT 的儲存庫範圍或權限，token 值不變，就不需要替換 Cloudflare Secret。** 新建、重新產生或更換 PAT，才需要更新既有 Worker 的執行時 Secret `GITHUB_ACTIONS_TOKEN`。不要把 token 提交到儲存庫或貼到聊天訊息。
 
-缺少 Secret、目的地設定不符、403、重新導向或不完整回應都會阻擋該工作；某個新儲存庫的權限問題不會停用既有 Twitch 工作。Worker 在同一 isolate 內另有進行中檢查與已派發 slot 保護，HTTP timeout 也不盲目重送。這是記憶體保護，不能代替 workflow 持久 slot guard，也不宣稱跨 isolate 的 exactly-once。
+可使用 `probeSchedulerPermissions(env)` 做 read-only 檢查：它只 GET 固定 workflow，對每個目的回報讀取結果，完全不 dispatch。GET 成功只能確認 Actions 讀取與 workflow 存在，**不能證明 Actions write 權限**；實際派發被拒絕時仍會以 403 停止該工作，不會改派其他目的地。
 
-以下 Twitch 專用流程與 GitHub 第 17 分備援敘述，適用於目前尚未切換的 staging 狀態；正式切換後依上表與單一 Cloudflare Cron 運作。
+單一 Cron 每天產生 120 個 tick，每次只查原定 Cron 分鐘到期的工作，Twitch 不會因 00、15、17、30 分的 tick 額外重試。延遲到同一小時內的 Twitch、Followers 補漏與前端分析仍可執行；跨小時則略過，避免補造舊時段觀測。每日刷新、成長與內容工作僅接受原定台灣日期內的延遲，不跨日補跑。傳入 workflow 的 slot 始終是原定到期時刻；Twitch 收集仍記錄實際量測時間。
 
-## 判斷流程
+Twitch 以外的五種工作會分別查五種 active 狀態，再分頁檢查最近執行紀錄。找到同 slot 的成功 run 就略過；同 slot 已失敗、取消或略過也不自動重送，避免每日 reset 被重複執行。成長／Followers 另查同 concurrency 群組的已知工作；Followers 也等待每日發現工作完成，避免新派發替換另一條流程已排隊的工作。三個相關手動一次性 workflow 僅列為 active blockers，不列入排程或 dispatch 清單。
 
-1. 每小時第 05 分由 Cron 執行，以實際執行時間取得目前 UTC 小時；若提早於第 05 分收到事件則略過本次檢查。台灣也是第 05 分，UTC 時段只用於內部識別。
+缺少 Secret、目的地設定不符、403、重新導向或不完整回應都會阻擋該工作；某個儲存庫的權限問題不會停用既有 Twitch 工作。Worker 在同一 isolate 內另有進行中檢查與已派發 slot 保護，HTTP timeout 也不盲目重送。這是記憶體保護，不能代替 workflow 持久 slot guard，也不宣稱跨 isolate 的 exactly-once。
+
+## Twitch 判斷流程
+
+1. 原定每小時第 05 分的 Cron 才檢查 Twitch，以實際執行時間取得目前 UTC 小時。同小時內延遲數分鐘仍可檢查，跨小時的舊 Cron 會略過；若提早於原定時刻收到事件則等待。台灣也是第 05 分，UTC 時段只用於內部識別。
 2. 讀取前端儲存庫的 `data/twitch_collection_status.json`。只有 `collection_complete: true`、時間欄位一致且 `observed_slot` 是目前小時，才視為已完成。
 3. 分別查詢 `queued`、`in_progress`、`waiting`、`pending`、`requested` 工作，任何一種存在就等待。即使是前一天尚未解除的工作，也不會被最近幾筆歷史遮住。
 4. 分頁讀取最近兩小時內建立的執行紀錄。當前小時建立的工作，或標題含 `slot=<目前 UTC 時段>` 的工作，計入嘗試次數。GitHub `run_attempt` 也計入；已完成但沒有發布回條的工作同樣不視為成功。
 5. 保留事件重送時的防重複保護：本小時已看到 2 次嘗試，或最近一次完成未滿 10 分鐘，就不觸發。狀態讀取失敗、內容異常或超過讀取上限時停止本次觸發；Cloudflare 不會另外安排本小時重試，下次定期檢查在下一小時第 05 分。
 6. 透過 `workflow_dispatch` 傳入 `target_slot`、`trigger_source=cloudflare`、`force=false`。HTTP 成功只代表 GitHub 接受觸發；是否發布成功仍須對照 Actions 與回條。下一輪排程只檢查屆時的目前小時。
 
-GitHub 原本第 17 分的排程保留為備援。所有入口進入同一 concurrency 群組，真正開始收集前再次確認目前小時是否已發布。跨小時才開始的 Cloudflare 舊時段工作會跳過，不會把現在的直播資料寫成過去的觀測。
+GitHub 原本第 17 分的 Twitch 定時排程已移除。手動及必要的 push 入口仍進入同一 concurrency 群組，真正開始收集前再次確認目前小時是否已發布。跨小時才開始的 Cloudflare 舊時段工作會跳過，不會把現在的直播資料寫成過去的觀測。
 
 ### 回條代表什麼
 
@@ -61,15 +64,15 @@ GitHub 原本第 17 分的排程保留為備援。所有入口進入同一 concu
 
 ## 部署前提
 
-先將支援 `target_slot`、`trigger_source`、`force` 輸入、收集前檢查與發布回條的新版 `collect.yml` 合併到後端 `main`，再啟用 Cloudflare Cron。否則 GitHub 會拒絕未知輸入，Worker 也無法判定發布是否成功。
+部署時，四個儲存庫的六個 workflow 必須已包含控制器需要的輸入與 run-name；Twitch `collect.yml` 另需 `force` 輸入、收集前檢查與發布回條。正式排程表與五項 enable 清單需同時保持一致，否則可能出現未知輸入被拒絕、工作停用或無法判定發布成功。
 
 需要 Cloudflare 帳號與一個 GitHub fine-grained personal access token：
 
 - Resource owner：`danielet087`。
-- Repository access：只選 `game-trend-radar-twitch-backend`。
+- Repository access：選 `game-trend-radar-twitch-backend`、`game-trend-radar-backend`、`game-trend-radar-content-backend`、`game-trend-radar`。
 - Repository permissions：`Actions` → `Read and write`；Metadata 的必要讀取權限會自動包含。
 - 不需要前端 Contents 權限；回條從公開網址讀取。
-- 設定適合的到期日，並在到期前更新 Cloudflare Secret；失效時 Worker 會停止觸發並記錄 `github_runs_http_401` 或 `403`。
+- 設定適合的到期日；更換 token 值時更新 Cloudflare 執行時 Secret。只擴充同一 PAT 權限而未更換值時，不必替換 Secret。失效時 Worker 會停止觸發並記錄 `github_runs_http_401` 或 `403`。
 
 不要把 token 放進程式、`wrangler.toml`、GitHub commit 或聊天訊息。
 
@@ -87,9 +90,9 @@ GitHub 原本第 17 分的排程保留為備援。所有入口進入同一 concu
 | Build command | `node --test test/*.test.mjs` |
 | Deploy command | `npx wrangler deploy` |
 
-部署成功後，在 Worker 的 **Settings → Variables and Secrets** 新增 **Secret** `GITHUB_ACTIONS_TOKEN`，填入上述 GitHub token 並套用變更。不要填在 Build variables and secrets；建置用 Secret 不會自動成為執行時的 Secret。
+首次部署後，在 Worker 的 **Settings → Variables and Secrets** 新增執行時 **Secret** `GITHUB_ACTIONS_TOKEN`，填入上述 GitHub token 並套用變更。既有 Secret 使用同一 PAT 且值未變時直接保留；新建或重新產生 token 才更新它。不要填在 Build variables and secrets；建置用 Secret 不會自動成為執行時的 Secret。
 
-Git 連接方式會執行 Wrangler 並套用設定檔，包括每小時第 05 分 Cron、一般變數、日誌與關閉 HTTP 路由。`No URLs enabled` 是預期設定，不需要新增網域。往後推送 `main` 會依 Cloudflare Builds 的分支與路徑設定觸發部署；程式成功部署不等於已成功觸發採集，仍需確認 Secret、Cron 與執行紀錄。
+Git 連接方式會執行 Wrangler 並套用設定檔，包括單一 `0,5,15,17,30 * * * *` Cron、五項 enable 清單、一般變數、日誌與關閉 HTTP 路由。`No URLs enabled` 是預期設定，不需要新增網域。往後推送 `main` 會依 Cloudflare Builds 的分支與路徑設定觸發部署；程式成功部署不等於已成功觸發採集，仍需確認 Secret、Cron 與執行紀錄。
 
 若出現 `Latest build failed`，開啟該次建置日誌確認錯誤。Worker 名稱與設定檔不一致會造成 Git 連接部署失敗；修正後應部署最新 commit，不要只重試舊 commit。成功後從 Observability 查看 `dispatch`、`already_published` 或 `workflow_active` 等結果，再對照 GitHub Actions 與前端回條。新 Cron 的設定傳播可能需要最多 15 分鐘。
 
@@ -97,16 +100,16 @@ Git 連接方式會執行 Wrangler 並套用設定檔，包括每小時第 05 �
 
 1. 在 Workers & Pages 建立 Worker，名稱使用 `game-trend-radar-twitch-backend`。若已建立或連接 GitHub，直接使用既有 Worker，不要另建第二個監控器。
 2. 將 `src/worker.mjs` 的完整內容貼入編輯器並部署。程式無外部依賴，可以直接使用；尚未加入 Cron 時不會收集。
-3. 在 Worker 設定的 Variables and Secrets 加入 **Secret** `GITHUB_ACTIONS_TOKEN`，值為上述 GitHub token，套用變更。其餘設定已有程式預設值。
+3. 在 Worker 設定的 Variables and Secrets 加入執行時 **Secret** `GITHUB_ACTIONS_TOKEN`，值為上述四個儲存庫 Actions RW 的 GitHub PAT；已有且未換值的 Secret 直接保留。同時新增一般變數 `RADAR_ENABLED_JOBS`，值為 `steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights`，並套用變更。只貼程式而沒設定這個 enable 清單，五個非 Twitch 工作仍會停用。
 4. 在 Domains & Routes 停用 `workers.dev` 路由與 Preview URLs；這個 Worker 只需要排程，即使誤開網址也只會回傳 404。
-5. 在 Triggers / Cron Triggers 將排程設為 `5 * * * *`。若已有 `*/5 * * * *`，請修改原項目，避免保留兩個排程。Cron 使用 UTC，新增或修改可能需要最多 15 分鐘傳播。
-6. 從 Worker Logs / Observability 查看下一次檢查結果；搭配 GitHub Actions 確認開始執行，再確認前端回條出現並與歷史 JSON 一起更新。
+5. 在 Triggers / Cron Triggers 將原項目改為單一 `0,5,15,17,30 * * * *`，移除舊的 `5 * * * *`、`*/5 * * * *` 或重複項目。Cron 使用 UTC，新增或修改可能需要最多 15 分鐘傳播；台灣的分鐘數相同，每日時段由程式依 UTC+8 選擇。
+6. 確認六個 GitHub 原生定時 `schedule` 已停用，再從 Worker Logs / Observability 查看對應 `job_id` 的下一次檢查結果；搭配 Actions 的 `slot=` 標題確認工作開始與完成。Twitch 另須確認前端回條與歷史 JSON 一起更新。
 
-僅貼上程式的方式不會自動套用儲存庫的 `wrangler.toml`，因此需要手動設定 Secret、Cron 與路由；若日後改用 Git 連接或 CLI 部署，會以該設定檔為準。
+僅貼上程式的方式不會自動套用儲存庫的 `wrangler.toml`，因此需要手動設定執行時 Secret、enable 清單、Cron 與路由；若日後改用 Git 連接或 CLI 部署，會以該設定檔為準。已採用 Git 連接時，請修改儲存庫宣告設定來變更 Cron 或一般變數，避免只在控制台手改而被下一次 Wrangler 部署覆寫。
 
 ### 方法 C：Wrangler CLI
 
-從此目錄執行（Node.js 22 或更新版本）：
+首次建立時，從此目錄執行（Node.js 22 或更新版本）：
 
 ```sh
 node --test test/*.test.mjs
@@ -116,7 +119,7 @@ npx wrangler secret put GITHUB_ACTIONS_TOKEN
 npx wrangler tail
 ```
 
-`secret put` 會在本機互動式詢問 token。第一次 `deploy` 至 `secret put` 完成之間，即使 Cron 已觸發也會因缺少 Secret 而停止，不會呼叫 GitHub。設定檔關閉 `workers.dev` 與預覽網址，包含每小時第 05 分 Cron；不需要自行新增 HTTP 路由。部署需要你自己的 Cloudflare 帳號授權。
+`secret put` 會在本機互動式詢問 token。第一次 `deploy` 至 `secret put` 完成之間，即使 Cron 已觸發也會因缺少 Secret 而停止，不會呼叫 GitHub。已有同一 token 的執行時 Secret 時，可略過 `secret put`。設定檔關閉 `workers.dev` 與預覽網址，包含單一正式 Cron 與五項 enable 清單；不需要自行新增 HTTP 路由。部署需要你自己的 Cloudflare 帳號授權。
 
 現有 `TWITCH_CLIENT_ID`、`TWITCH_CLIENT_SECRET`、`FRONTEND_REPO_TOKEN` 繼續留在 GitHub，**不必複製到 Cloudflare**。使用控制台或本機登入部署，也不必新增 Cloudflare API token 到 GitHub。
 
@@ -127,7 +130,7 @@ npx wrangler tail
 node --test test/*.test.mjs
 ```
 
-測試涵蓋已發布、404 首次啟動、跨日 UTC 時段、舊觀測延後發布、五種執行中狀態、冷卻與上限、分頁、觸發回應、API 失敗、異常回條、巨大回應、秘密不送到公開網址，以及 HTTP 端點不執行工作。
+測試涵蓋六項工作時段、台灣午夜與 UTC 跨年、03:00–23:00 窗口、原定分鐘 slot、同小時延遲與跨小時／跨日拒絕、同 slot 成功或失敗不重送、共用 concurrency blockers、權限不足時隔離各工作，以及原有 Twitch 回條、404 首次啟動、五種 active 狀態、冷卻與上限、分頁、觸發回應、異常或巨大回應、秘密不送到公開網址及 HTTP 端點不執行工作。
 
 GitHub CI 另以 Miniflare／workerd 執行真實 Workers 請求相容性測試，所有外部請求都由本機 fixture 回應，不使用真實 token 或觸發 GitHub。測試工具獨立放在 `test/runtime`，不增加 Worker 執行時依賴，也不需要修改 Cloudflare 的 Build command。
 
@@ -147,19 +150,27 @@ Worker 結構化日誌只包含結果代碼、時段與執行 ID，不輸出 tok
 | `wait` / `workflow_active` | 已有工作排隊或執行 |
 | `wait` / `retry_cooldown` | 等候 10 分鐘重試間隔 |
 | `wait` / `hourly_attempt_limit` | 已看見 2 次嘗試，不再自動觸發 |
-| `dispatch` / `missing_published_collection` | GitHub 已接受觸發；尚未代表資料已更新 |
+| `dispatch` / `missing_published_collection` | GitHub 已接受 Twitch 觸發；尚未代表資料已更新 |
+| `dispatch` / `scheduled_slot_due` | GitHub 已接受其他工作到期時段的觸發 |
+| `skip` / `slot_completed` | 同 slot 已有成功執行紀錄 |
+| `skip` / `slot_already_attempted` | 同 slot 已有執行紀錄，即使失敗也不自動重送 |
+| `wait` / `slot_dispatch_attempted` | 本 isolate 已嘗試派發同 slot，避免 timeout 後盲目重送 |
+| `skip` / `stale_cron_delivery` | 延遲事件已跨過工作允許的小時或台灣日期 |
+| `skip` / `no_job_due` | 該 Cron 分鐘沒有到期工作 |
+| `skip` / `job_staged` | 該非 Twitch 工作不在 enable 清單；正式六項開啟時不應出現 |
 | `blocked` / `receipt_redirect_rejected`、`github_runs_redirect_rejected` 或 `github_dispatch_redirect_rejected` | 來源回傳重新導向；沒有跟隨目標網址，也不視為觸發成功 |
 | `blocked` / `receipt_*` 或 `github_*` | 讀取失敗或內容不可信；此次沒有盲目補跑 |
 
 ## 免費額度與限制
 
-每小時一次，共 24 次定期檢查／日。當前小時回條已完成時只讀一次小檔案；待收集時多讀 GitHub 狀態。這個設計使用 Workers 免費方案，不把 20～25 分鐘的 Python 工作搬到 Worker，但正式啟用後仍須查看 CPU 與請求用量，確認符合免費方案限制。
+單一 Cron 每小時 00、05、15、17、30 分執行，共 120 個 tick／日，每次只查原定分鐘到期的工作，沒有工作到期就直接略過。Twitch 當前小時回條已完成時只讀一次小檔案；待收集時多讀 GitHub 狀態。這個設計使用 Workers 免費方案，不把 20～25 分鐘的 Python 工作搬到 Worker；仍須查看 CPU 與請求用量，確認符合免費方案限制。
 
-- 每小時排程搭配 GitHub 原生備援可降低漏觸發，但 Cloudflare 不會每 5 分鐘檢查或在同小時定期重試，也不是平台可用性保證。Cloudflare Cron、GitHub API、GitHub runner 或 Twitch 都可能延遲／失敗。
-- 不使用持久鎖，因此兩個幾乎同時到達的 Cron 可能都接受到「尚無工作」並重複 dispatch。後端 concurrency 與執行前回條檢查是必要的防重複收集措施。
-- 「2 次」限制是 **Worker 依已看見的紀錄決定是否再觸發**；不是所有來源的硬性全域上限。第 17 分的備援或手動強制執行仍可能額外啟動；跳過收集的同小時工作也會保守計入上限。狀態 API 短暫延後顯示也不能視為交易鎖。
+- 六項工作使用 Cloudflare 作為唯一固定排程來源；GitHub 原生定時備援已移除。單一 Cron 的其他分鐘不會額外檢查 Twitch，也不會在同 slot 安排定期重試。這不是平台可用性保證，Cloudflare Cron、GitHub API、GitHub runner 或資料來源仍可能延遲／失敗。
+- Worker 記憶體中的進行中檢查與已派發 slot 紀錄只能防護同一 isolate；未使用跨 isolate 的持久鎖。兩個幾乎同時到達不同 isolate 的 Cron 仍可能在 GitHub run 可見前重複 dispatch，不能宣稱 exactly-once。後端 concurrency、執行前回條／slot 檢查及每日重設的持久狀態是必要的防護。
+- Twitch「2 次」限制是 **Worker 依已看見的紀錄決定是否再觸發**，不是所有來源的硬性全域上限；手動強制執行或必要 push 入口仍可能額外啟動。跳過收集的同小時工作也會保守計入上限，狀態 API 短暫延後顯示不能視為交易鎖。其他五種工作只要已看見同 slot run，就不會自動重送。
 - 只檢查目前小時，不會補造過去漏掉的直播觀眾數。現在重跑只能獲得現在的資料；過去缺少的歷史量測仍保留為缺值。
-- Workflow 顯示成功但沒有回條，不代表資料已發布；同小時內可能由第 17 分備援或人工重跑處理，Cloudflare 不會額外排定重試。本版不會自動下載舊 artifact 重發；有效 artifact 可人工恢復發布，不能冒充新的觀測時間。
+- Twitch workflow 顯示成功但沒有回條，不代表資料已發布；同小時內可人工檢查與重跑，Cloudflare 不會額外排定重試。本版不會自動下載舊 artifact 重發；有效 artifact 可人工恢復發布，不能冒充新的觀測時間。
 - 長期卡在排隊／等待核准的 GitHub 工作不會被自動取消，需要查看原因。Worker 選擇等待，避免以更多排隊工作淹沒執行器。
 
 官方文件：[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)、[Wrangler 設定](https://developers.cloudflare.com/workers/wrangler/configuration/)、[Workers Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[GitHub workflow runs](https://docs.github.com/en/rest/actions/workflow-runs)、[GitHub workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)。
+
