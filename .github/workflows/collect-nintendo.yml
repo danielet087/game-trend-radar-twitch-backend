@@ -132,7 +132,7 @@ jobs:
         if: always() && steps.guard.outputs.should_collect == 'true' && hashFiles('nintendo/output/nintendo_upcoming.json') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: nintendo-catalog
+          name: nintendo-catalog-${{ github.run_attempt }}
           path: nintendo/output/*.json
           if-no-files-found: error
           retention-days: 14
@@ -144,9 +144,11 @@ jobs:
           from pathlib import Path
           catalog = json.loads(Path('output/nintendo_upcoming.json').read_text(encoding='utf-8'))
           games = catalog['games']
+          ps5_count = sum(any(release['platform'] == 'PS5' for release in game['releases']) for game in games)
           result = {'status': 'collected', 'generated_at': catalog['generated_at'], 'public_count': len(games), 'games': [{'id': game['id'], 'name': game.get('display_name', game.get('name_en')), 'hypes': game['hypes'], 'platforms': game['platforms'], 'releases': game['releases'], 'exclusivity': game['exclusivity']} for game in games]}
           print('NINTENDO_RESULT ' + json.dumps(result, ensure_ascii=False))
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
               summary.write(f"### IGDB（NS／NS2／PS5）：已收集 {len(games)} 款符合月曆條件的遊戲\n\n")
+              summary.write(f"其中 {ps5_count} 款有未來一年 PS5 平台發售日期。\n\n")
               summary.write('採 hypes ≥ 30、未來 365 天、平台別確切日期及內容資格驗證。發布結果請對照 Publish 步驟與前端回條。\n')
           PY
