@@ -1,7 +1,7 @@
-name: Collect Nintendo catalog
-run-name: "Nintendo catalog | slot=${{ inputs.target_slot || 'manual' }} | ${{ inputs.trigger_source || github.event_name }}"
+name: Collect IGDB console catalog
+run-name: "IGDB console catalog | slot=${{ inputs.target_slot || 'manual' }} | ${{ inputs.trigger_source || github.event_name }}"
 
-# The Nintendo backend owns collection and validation. This credential host
+# The IGDB console backend owns collection and validation. This credential host
 # reuses existing IGDB/publication secrets; Cloudflare supplies the daily slot.
 # Large candidate ledgers use compact JSON; public cards remain a small catalog.
 on:
@@ -54,7 +54,7 @@ jobs:
           FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
         run: |
           if [ -z "$TWITCH_CLIENT_ID" ] || [ -z "$TWITCH_CLIENT_SECRET" ] || [ -z "$FRONTEND_REPO_TOKEN" ]; then
-            echo '::error::Missing Nintendo collection or publication credentials.'
+            echo '::error::Missing IGDB collection or publication credentials.'
             exit 1
           fi
       - uses: actions/setup-python@v5
@@ -77,7 +77,7 @@ jobs:
           args=(--target-slot "$TARGET_SLOT" --trigger-source "$TRIGGER_SOURCE")
           if [ "$FORCE_COLLECTION" = 'true' ]; then args+=(--force); fi
           python -m scripts.guard "${args[@]}"
-      - name: Load persistent Nintendo candidates
+      - name: Load persistent IGDB console candidates
         if: steps.guard.outputs.should_collect == 'true'
         env:
           FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
@@ -118,10 +118,10 @@ jobs:
           args=(--output-dir output)
           if [ -f input/nintendo_master.json ]; then args+=(--existing input/nintendo_master.json); fi
           python -m nintendo_backend.collect "${args[@]}"
-      - name: Verify available Nintendo exclusivity evidence
+      - name: Verify available console exclusivity evidence
         if: steps.guard.outputs.should_collect == 'true'
         run: python -m nintendo_backend.exclusivity --output-dir output
-      - name: Publish Nintendo data and receipt
+      - name: Publish IGDB console data and receipt
         if: steps.guard.outputs.should_collect == 'true'
         env:
           FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
@@ -136,7 +136,7 @@ jobs:
           path: nintendo/output/*.json
           if-no-files-found: error
           retention-days: 14
-      - name: Summarize Nintendo collection
+      - name: Summarize IGDB console collection
         if: always() && hashFiles('nintendo/output/nintendo_upcoming.json') != ''
         run: |
           python - <<'PY'
@@ -147,6 +147,6 @@ jobs:
           result = {'status': 'collected', 'generated_at': catalog['generated_at'], 'public_count': len(games), 'games': [{'id': game['id'], 'name': game.get('display_name', game.get('name_en')), 'hypes': game['hypes'], 'platforms': game['platforms'], 'releases': game['releases'], 'exclusivity': game['exclusivity']} for game in games]}
           print('NINTENDO_RESULT ' + json.dumps(result, ensure_ascii=False))
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
-              summary.write(f"### Nintendo：已收集 {len(games)} 款符合月曆條件的遊戲\n\n")
+              summary.write(f"### IGDB（NS／NS2／PS5）：已收集 {len(games)} 款符合月曆條件的遊戲\n\n")
               summary.write('採 hypes ≥ 30、未來 365 天、平台別確切日期及內容資格驗證。發布結果請對照 Publish 步驟與前端回條。\n')
           PY

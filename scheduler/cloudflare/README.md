@@ -16,7 +16,7 @@
 | `nintendo_daily` | 每日 08:30 | `game-trend-radar-twitch-backend`（憑證執行入口） | `collect-nintendo.yml` | — |
 | `frontend_insights` | 每小時第 17 分 | `game-trend-radar` | `radar-insights.yml` | — |
 
-Nintendo 的收集程式與候選資料位於獨立的 `game-trend-radar-igdb-backend`；`collect-nintendo.yml` 留在既有 Twitch 儲存庫，只負責在 runner 安全沿用現有 IGDB／Twitch 憑證並執行 Nintendo 收集器。Nintendo 使用獨立 workflow 與 concurrency，不經過 Twitch 直播或 Steam Followers 佇列。每日 08:30 重用原有 30 分 Cron tick，因此不新增 Cron，也不增加每天 120 個 tick；Cloudflare PAT 仍只需原先四個儲存庫，不必新增 Nintendo 儲存庫權限。
+IGDB（NS／NS2／PS5）的收集程式與候選資料位於獨立的 `game-trend-radar-igdb-backend`；`collect-nintendo.yml` 留在既有 Twitch 儲存庫，只負責在 runner 安全沿用現有 IGDB／Twitch 憑證並執行 IGDB 主機收集器。IGDB 主機收集使用獨立 workflow 與 concurrency，不經過 Twitch 直播或 Steam Followers 佇列。每日 08:30 重用原有 30 分 Cron tick，因此不新增 Cron，也不增加每天 120 個 tick；Cloudflare PAT 仍只需原先四個儲存庫，不必新增 IGDB 後端儲存庫權限。
 
 Twitch 以外的六個 workflow 接受 `target_slot` 與 `trigger_source=cloudflare`；`target_slot` 使用原定到期時刻的 UTC ISO 字串，包含分鐘，並且 `run-name` 須含獨立 `slot=<同一時刻>` 欄位。例如 `Steam growth | slot=2026-10-02T17:15:00Z | cloudflare`。Twitch 仍使用 UTC 整點小時作為 slot。
 
