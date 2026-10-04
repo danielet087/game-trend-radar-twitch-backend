@@ -43,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: danielet087/game-trend-radar-nintendo-backend
+          repository: danielet087/game-trend-radar-igdb-backend
           ref: main
           path: nintendo
           persist-credentials: false
