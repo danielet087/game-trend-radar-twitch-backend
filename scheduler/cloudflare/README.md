@@ -35,7 +35,7 @@ Twitch 以外的六個 workflow 接受 `target_slot` 與 `trigger_source=cloudfl
 
 單一 Cron 每天產生 120 個 tick，每次只查原定 Cron 分鐘到期的工作，Twitch 不會因 00、15、17、30 分的 tick 額外重試。延遲到同一小時內的 Twitch、Followers 補漏與前端分析仍可執行；跨小時則略過，避免補造舊時段觀測。每日刷新、成長與內容工作僅接受原定台灣日期內的延遲，不跨日補跑。傳入 workflow 的 slot 始終是原定到期時刻；Twitch 收集仍記錄實際量測時間。
 
-Twitch 以外的工作會查 active 狀態與分頁執行紀錄。同 slot 已嘗試不重送；每日候選與 Steam 成長另每六小時檢查，當天任一完整成功便跳過後續時段，失敗／取消／未執行則在下一檢查時段重試，仍在排隊或執行時等待。日期以 Asia/Taipei 計算，讀取範圍從當日午夜開始，不把前日成功沿用到今天。每日候選只採信當日有效排程 slot，手動的一個批次續跑不算每日刷新成功；同日重试續用已保存的候選進度，不再次重設。成長需該次 run 的 `Require complete growth coverage` 步驟成功，429、部分量測、錯誤或覆蓋不足會在保存／發布成果後使 workflow 失敗，舊版顯示成功卻沒有此驗證的 run 不阻止重試。成長／Followers 另查同 concurrency 群組的已知工作；候選重試與整點 Followers 同時到期時先檢查候選，候選需執行或等待時該輪 Followers 等待，避免尚未可見的派發競爭。三個相關手動一次性 workflow 僅列為 active blockers，不列入排程或 dispatch 清單。
+Twitch 以外的工作會查 active 狀態與分頁執行紀錄。同 slot 已嘗試不重送；每日候選與 Steam 成長另每六小時檢查，當天任一完整成功便跳過後續時段，失敗／取消／未執行則在下一檢查時段重試，仍在排隊或執行時等待。日期以 Asia/Taipei 計算，讀取範圍從當日午夜開始，不把前日成功沿用到今天。每日候選只採信當日有效排程 slot，手動的一個批次續跑不算每日刷新成功；同日重試續用已保存的候選進度，不再次重設。成長需該次 run 的 `Require complete growth coverage` 步驟成功，429、部分量測、錯誤或覆蓋不足會在保存／發布成果後使 workflow 失敗，舊版顯示成功卻沒有此驗證的 run 不阻止重試。成長／Followers 另查同 concurrency 群組的已知工作；07:15／13:15／19:15 成長重試可排在正在執行的 Followers 後面，由共用 GitHub concurrency 鎖依序執行，避免每次重試都撞上整點收集而無法啟動；若已有排隊／等待中的工作則不再派發。候選重試會先等待既有成長或官方 Followers 工作結束；候選重試與整點 Followers 同時到期時先檢查候選，候選需執行或等待時該輪 Followers 等待，避免尚未可見的派發競爭。三個相關手動一次性 workflow 僅列為 active blockers，不列入排程或 dispatch 清單。
 
 缺少 Secret、目的地設定不符、403、重新導向或不完整回應都會阻擋該工作；某個儲存庫的權限問題不會停用既有 Twitch 工作。Worker 在同一 isolate 內另有進行中檢查與已派發 slot 保護，HTTP timeout 也不盲目重送。這是記憶體保護，不能代替 workflow 持久 slot guard，也不宣稱跨 isolate 的 exactly-once。
 

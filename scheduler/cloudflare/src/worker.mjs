@@ -161,14 +161,17 @@ async function readReceipt(fetchImpl, settings, now) {
   return receipt;
 }
 
-async function activeRun(fetchImpl, settings) {
+async function activeRun(fetchImpl, settings, allowInProgress = false) {
   // Filtered queries find an old blocked run even if many newer completed runs exist.
   const checks = await Promise.allSettled(ACTIVE_STATUSES.map((status) =>
     fetchRuns(fetchImpl, settings, { status, per_page: 1, page: 1 })));
   const failed = checks.find((result) => result.status === "rejected");
   if (failed) throw failed.reason;
-  for (const check of checks) {
-    if (check.value.total_count > 0) return check.value.workflow_runs[0];
+  for (const [index, check] of checks.entries()) {
+    if (check.value.total_count === 0) continue;
+    const run = check.value.workflow_runs[0];
+    if (allowInProgress && ACTIVE_STATUSES[index] === "in_progress" && run.status === "in_progress") continue;
+    return run;
   }
   return null;
 }
@@ -254,7 +257,9 @@ export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetc
 export const SCHEDULE_JOBS = Object.freeze([
   { id: "twitch", repo: "game-trend-radar-twitch-backend", workflow: "369223512", enabled: true, minute: 5 },
   { id: "steam_daily", repo: "game-trend-radar-backend", workflow: "steam-two-phase.yml", enabled: false,
-    minute: 0, taipeiHours: [0, 6, 12, 18], oncePerDay: true, inputs: { refresh_today: "true" } },
+    minute: 0, taipeiHours: [0, 6, 12, 18], oncePerDay: true, inputs: { refresh_today: "true" },
+    blockingWorkflows: ["steam-public-growth.yml", "steam-official-daily-catchup-250.yml", "steam-official-backlog-oneoff-20260923.yml",
+      "steam-official-nearfirst-batch-once.yml", "steam-official-hour-stress-once.yml"] },
   { id: "steam_catchup", repo: "game-trend-radar-backend", workflow: "steam-official-daily-catchup-250.yml", enabled: false,
     minute: 0, taipeiHours: Array.from({ length: 21 }, (_, index) => index + 3),
     blockingWorkflows: ["steam-public-growth.yml", "steam-two-phase.yml", "steam-official-backlog-oneoff-20260923.yml",
@@ -396,9 +401,15 @@ async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
     // GitHub concurrency retains just one pending run per group. Inspect known
     // group peers before dispatch so a new hourly run does not replace a pending
     // growth run. Catchup also waits for daily discovery to finish updating data.
-    const blockingChecks = await Promise.allSettled([job.workflow, ...(job.blockingWorkflows || [])].map(async (workflow) => ({
-      workflow, active: await activeRun(fetchImpl, { ...jobSettings, workflow }),
-    })));
+    const blockingChecks = await Promise.allSettled([job.workflow, ...(job.blockingWorkflows || [])].map(async (workflow) => {
+      // A retry at :15 otherwise collides with the :00 catchup on every attempt.
+      // Growth shares its GitHub concurrency group: queue behind a running
+      // catchup, but never replace a queued/waiting peer. Later hourly catchups
+      // already wait for queued growth. The original 01:15 behavior is unchanged.
+      const queueBehindCatchup = job.id === "steam_growth" && workflow === "steam-official-daily-catchup-250.yml" &&
+        new Date(timestamp(slot) + 8 * HOUR_MS).getUTCHours() !== 1;
+      return { workflow, active: await activeRun(fetchImpl, { ...jobSettings, workflow }, queueBehindCatchup) };
+    }));
     const failedCheck = blockingChecks.find((result) => result.status === "rejected");
     if (failedCheck) throw failedCheck.reason;
     const activeCheck = blockingChecks.find((result) => result.value.active);

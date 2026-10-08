@@ -437,3 +437,49 @@ test("a six-hour candidate retry takes priority over the simultaneous hourly cat
   assert.equal(afterSuccess.find((item) => item.job_id === "steam_catchup").action, "dispatch");
   assert.equal(complete.posts().length, 1);
 });
+
+test("a candidate retry waits for an official collector still running from an earlier hour", async () => {
+  for (const [index, blocker] of ["steam-official-daily-catchup-250.yml", "steam-public-growth.yml",
+    "steam-official-backlog-oneoff-20260923.yml", "steam-official-nearfirst-batch-once.yml",
+    "steam-official-hour-stress-once.yml"].entries()) {
+    const date = `2026-11-${12 + index}`;
+    const api = fixture({ activeWorkflows: { [blocker]: { in_progress: [run(iso(`${date}T05:00:00+08:00`), { status: "in_progress" })] } } });
+    const results = await check(api, `${date}T06:00:00+08:00`);
+    const daily = results.find((item) => item.job_id === "steam_daily");
+    assert.equal(daily.reason, "workflow_active");
+    assert.equal(daily.blocking_workflow, blocker);
+    assert.equal(results.find((item) => item.job_id === "steam_catchup").reason, "daily_refresh_priority");
+    assert.equal(api.posts().length, 0);
+  }
+});
+
+test("growth retries queue behind a running catchup rather than missing every six-hour retry", async () => {
+  for (const [index, hour] of [7, 13, 19].entries()) {
+    const date = `2026-11-${17 + index}`;
+    const planned = `${date}T${String(hour).padStart(2, "0")}:15:00+08:00`;
+    const api = fixture({ runs: [run(iso(`${date}T01:15:00+08:00`), { conclusion: "failure" })], activeWorkflows: {
+      "steam-official-daily-catchup-250.yml": { in_progress: [run(iso(`${date}T${String(hour).padStart(2, "0")}:00:00+08:00`), { status: "in_progress" })] },
+    } });
+    assert.equal((await check(api, planned))[0].action, "dispatch");
+    assert.equal(api.posts().length, 1);
+    assert.ok(api.posts()[0].url.pathname.includes("/steam-public-growth.yml/dispatches"));
+  }
+});
+
+test("growth retries do not replace pending catchups or duplicate their own active work", async () => {
+  for (const [index, status] of ["queued", "waiting", "pending", "requested"].entries()) {
+    const date = `2026-11-${20 + index}`;
+    const api = fixture({ activeWorkflows: { "steam-official-daily-catchup-250.yml": {
+      in_progress: [run(iso(`${date}T07:00:00+08:00`), { status: "in_progress" })],
+      [status]: [run(iso(`${date}T07:01:00+08:00`), { id: 23457, status })],
+    } } });
+    assert.equal((await check(api, `${date}T07:15:00+08:00`))[0].reason, "workflow_active");
+    assert.equal(api.posts().length, 0);
+  }
+  const own = fixture({ activeWorkflows: {
+    "steam-public-growth.yml": { queued: [run("2026-11-24T23:00:00Z", { status: "queued" })] },
+    "steam-official-daily-catchup-250.yml": { in_progress: [run("2026-11-24T23:00:00Z", { status: "in_progress" })] },
+  } });
+  assert.equal((await check(own, "2026-11-25T07:15:00+08:00"))[0].blocking_workflow, "steam-public-growth.yml");
+  assert.equal(own.posts().length, 0);
+});
