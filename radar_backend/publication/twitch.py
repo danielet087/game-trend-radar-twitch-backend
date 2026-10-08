@@ -25,21 +25,50 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError("Collected JSON contains duplicate keys")
+            raise ValueError("JSON contains duplicate keys")
         result[key] = value
     return result
 
 
 def _reject_constant(_: str) -> None:
-    raise ValueError("Collected JSON contains a non-finite number")
+    raise ValueError("JSON contains a non-finite number")
+
+
+def _strict_json(path: Path) -> Any:
+    document = json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=_unique_keys, parse_constant=_reject_constant,
+    )
+    # Exponent overflow (e.g. 1e999) is parsed as a float rather than a JSON
+    # constant; canonical validation also rejects that non-finite value.
+    snapshot_revision(document)
+    return document
+
+
+def _preflight_existing_json(frontend: Path) -> None:
+    """Reject ambiguous destination data before a merge can rewrite its proof."""
+    for relative in PUBLICATION_PATHS:
+        path = frontend / relative
+        current = path
+        while current != frontend:
+            if current.is_symlink():
+                raise ValueError("Published JSON cannot use symlinks")
+            current = current.parent
+        if not path.exists():
+            continue
+        if path.is_dir():
+            for item in path.rglob("*"):
+                if item.is_symlink():
+                    raise ValueError("Published JSON cannot use symlinks")
+                if item.is_file() and item.suffix == ".json":
+                    _strict_json(item)
+        else:
+            _strict_json(path)
 
 
 def freeze_snapshot(source: str | Path) -> dict[str, Any]:
     """Read and validate once, before any destination checkout is refreshed."""
-    payload = json.loads(
-        Path(source).read_text(encoding="utf-8"),
-        object_pairs_hook=_unique_keys, parse_constant=_reject_constant,
-    )
+    payload = _strict_json(Path(source))
     if not isinstance(payload, dict):
         raise ValueError("Collected snapshot must be an object")
     validate_snapshot(payload)
@@ -72,6 +101,7 @@ def merge_frozen_snapshot(
     payload: dict[str, Any], frontend: Path, *, source_revision: str, payload_revision: str,
 ) -> None:
     """Keep existing observation ordering and all independent enrollment sources."""
+    _preflight_existing_json(frontend)
     latest_path = frontend / "data/twitch_live.json"
     if latest_path.exists():
         latest = json.loads(latest_path.read_text(encoding="utf-8"))

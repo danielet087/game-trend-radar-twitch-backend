@@ -23,7 +23,7 @@ application 可使用記憶體 input store 與假的 collector，不需環境變
 
 application 先對已載入的 tracking、Steam catalog、mapping、discovery 四份輸入計算 canonical JSON 的 SHA-256 `input_revision`，再呼叫既有 collector。收集 output 保持 schema v2，僅追加這個 revision；沒有新增 API、資格規則或量測時間。
 
-publication 在刷新目的地前只讀一次完整收集 JSON。每次 Git push 競爭失敗，都從最新 `origin/main` 重新呼叫既有 `store_snapshot`，沿用觀測排序、每日歷史、來源聯集與較新的 tracking／mapping／discovery 決策。latest、實際小時 history、tracking、mapping、discovery 與 collection status 在同一個 commit；不重查 API、不重算觀測時間、不覆蓋其他來源 JSON。延遲結果仍可保存其真實歷史及補回來源，但不能把最新 census 或時段回條倒退。同一觀測時間若已有不同 census，會停止發布，避免把新版本證明貼到未被接受的量測。
+publication 在刷新目的地前只讀一次完整收集 JSON。每次 Git push 競爭失敗，都從最新 `origin/main` 重新呼叫既有 `store_snapshot`，沿用觀測排序、每日歷史、來源聯集與較新的 tracking／mapping／discovery 決策。合併前會嚴格檢查所有現存發布 JSON（含完整歷史目錄），重複 key、非有限數值或 symlink 均先停止，避免重新寫檔把原資料損毀變成看似正常的輸出。latest、實際小時 history、tracking、mapping、discovery 與 collection status 在同一個 commit；不重查 API、不重算觀測時間、不覆蓋其他來源 JSON。延遲結果仍可保存其真實歷史及補回來源，但不能把最新 census 或時段回條倒退。同一觀測時間若已有不同 census，會停止發布，避免把新版本證明貼到未被接受的量測。
 
 | 欄位 | 意義 | 保存位置 |
 |---|---|---|

@@ -314,3 +314,92 @@ def test_job_push_failures_leave_source_and_remote_intact_without_old_artifact(r
     assert not artifact.exists()
     assert source.read_text() == raw
     assert git("--git-dir", remote, "rev-parse", "main") == original
+
+
+@pytest.mark.parametrize("owned_path", [
+    "data/twitch_live.json", "data/twitch_history/2026-09-29.json",
+    "data/twitch_collection_status.json", "data/twitch_tracking.json",
+    "data/twitch_steam_mapping.json", "data/twitch_steam_discovery.json",
+])
+@pytest.mark.parametrize("invalid_member", [
+    '"ambiguous": 0, "ambiguous": 1', '"unknown_metric": NaN', '"unknown_metric": 1e999',
+])
+def test_ambiguous_destination_json_never_gets_overwritten_or_acknowledged(
+    repository, owned_path, invalid_member,
+):
+    remote, seed, checkout = repository
+    newer = durable_payload()
+    merge_frozen_snapshot(newer, seed, source_revision=input_revision(newer),
+                          payload_revision=snapshot_revision(newer))
+    corrupted = seed / owned_path
+    raw = corrupted.read_text().rstrip()
+    corrupted.write_text(raw[:-1] + "," + invalid_member + "}\n")
+    git("add", ".", cwd=seed)
+    git("commit", "-m", "ambiguous destination fixture", cwd=seed)
+    git("push", "origin", "main", cwd=seed)
+    original = git("--git-dir", remote, "rev-parse", "main")
+    before = git("--git-dir", remote, "show", f"main:{owned_path}")
+    # A later source would normally rewrite latest/status/state/history. The
+    # preflight must catch corruption before the legacy helper can clean it.
+    incoming = scheduled_snapshot("2026-09-28T18:05:00Z", "2026-09-28T18:25:00Z",
+                                  target="2026-09-28T18:00:00Z", run_id="102")
+    bundle = durable_payload()
+    for key in ("tracking_state", "steam_mapping_state", "steam_discovery_state"):
+        incoming[key] = bundle[key]
+    with pytest.raises(ValueError):
+        publish_snapshot(incoming, SubprocessGitRepository(checkout, disposable_checkout=True))
+    assert git("--git-dir", remote, "rev-parse", "main") == original
+    assert git("--git-dir", remote, "show", f"main:{owned_path}") == before
+    assert git("status", "--porcelain", cwd=checkout) == ""
+
+
+def test_duplicate_history_hours_cannot_delete_a_newer_saved_observation(repository):
+    remote, seed, checkout = repository
+    newer = scheduled_snapshot("2026-09-28T17:05:00Z", "2026-09-28T17:25:00Z",
+                               target="2026-09-28T17:00:00Z", run_id="102")
+    history_path = store_snapshot(newer, seed)
+    history = seed / history_path
+    raw = history.read_text().rstrip()
+    # The duplicate empty object formerly made a plain JSON loader erase the
+    # already saved 17:00 census while accepting a newly collected 16:00 hour.
+    history.write_text(raw[:-1] + ', "hours": {}}\n')
+    git("add", ".", cwd=seed)
+    git("commit", "-m", "duplicate history hours fixture", cwd=seed)
+    git("push", "origin", "main", cwd=seed)
+    original = git("--git-dir", remote, "rev-parse", "main")
+    before = git("--git-dir", remote, "show", f"main:{history_path}")
+    with pytest.raises(ValueError, match="duplicate keys"):
+        publish_snapshot(scheduled_snapshot(), SubprocessGitRepository(checkout, disposable_checkout=True))
+    assert git("--git-dir", remote, "rev-parse", "main") == original
+    assert git("--git-dir", remote, "show", f"main:{history_path}") == before
+    assert '"2026-09-28T17:00:00Z"' in before
+
+
+def test_corrupt_history_outside_incoming_day_stops_before_any_rewrite(repository):
+    remote, seed, checkout = repository
+    history = seed / "data/twitch_history/2026-09-25.json"
+    history.parent.mkdir()
+    history.write_text('{"hours": {"older": true}, "hours": {}}\n')
+    git("add", ".", cwd=seed)
+    git("commit", "-m", "corrupt retained history fixture", cwd=seed)
+    git("push", "origin", "main", cwd=seed)
+    original = git("--git-dir", remote, "rev-parse", "main")
+    with pytest.raises(ValueError, match="duplicate keys"):
+        publish_snapshot(durable_payload(), SubprocessGitRepository(checkout, disposable_checkout=True))
+    assert git("--git-dir", remote, "rev-parse", "main") == original
+    assert "twitch_collection_status.json" not in git("--git-dir", remote, "ls-tree", "--name-only", "main:data")
+
+
+def test_owned_json_symlink_is_rejected_before_merge_can_write_outside(tmp_path):
+    frontend = tmp_path / "frontend"
+    (frontend / "data").mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    raw = json.dumps(scheduled_snapshot())
+    outside.write_text(raw)
+    (frontend / "data/twitch_live.json").symlink_to(outside)
+    payload = durable_payload()
+    with pytest.raises(ValueError, match="symlinks"):
+        merge_frozen_snapshot(payload, frontend, source_revision=input_revision(payload),
+                              payload_revision=snapshot_revision(payload))
+    assert outside.read_text() == raw
+    assert not (frontend / "data/twitch_collection_status.json").exists()
