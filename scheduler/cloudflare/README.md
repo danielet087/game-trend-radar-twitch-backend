@@ -9,9 +9,9 @@
 | 工作 ID | 台灣時間 | 儲存庫 | Workflow | 額外輸入 |
 | --- | --- | --- | --- | --- |
 | `twitch` | 每小時第 05 分 | `game-trend-radar-twitch-backend` | `collect.yml`（ID `369223512`） | `force=false` |
-| `steam_daily` | 每日 00:00 | `game-trend-radar-backend` | `steam-two-phase.yml` | `refresh_today=true` |
+| `steam_daily` | 每日 00:00／06:00／12:00／18:00 檢查，當日成功後略過 | `game-trend-radar-backend` | `steam-two-phase.yml` | `refresh_today=true` |
 | `steam_catchup` | 每日 03:00–23:00，每小時整點 | `game-trend-radar-backend` | `steam-official-daily-catchup-250.yml` | — |
-| `steam_growth` | 每日 01:15 | `game-trend-radar-backend` | `steam-public-growth.yml` | — |
+| `steam_growth` | 每日 01:15／07:15／13:15／19:15 檢查，當日成功後略過 | `game-trend-radar-backend` | `steam-public-growth.yml` | — |
 | `steam_content` | 每日 07:30、19:30 | `game-trend-radar-content-backend` | `steam-catalog-reconcile.yml` | — |
 | `nintendo_daily` | 每日 08:30 | `game-trend-radar-twitch-backend`（憑證執行入口） | `collect-nintendo.yml` | — |
 | `frontend_insights` | 每小時第 17 分 | `game-trend-radar` | `radar-insights.yml` | — |
@@ -35,7 +35,7 @@ Twitch 以外的六個 workflow 接受 `target_slot` 與 `trigger_source=cloudfl
 
 單一 Cron 每天產生 120 個 tick，每次只查原定 Cron 分鐘到期的工作，Twitch 不會因 00、15、17、30 分的 tick 額外重試。延遲到同一小時內的 Twitch、Followers 補漏與前端分析仍可執行；跨小時則略過，避免補造舊時段觀測。每日刷新、成長與內容工作僅接受原定台灣日期內的延遲，不跨日補跑。傳入 workflow 的 slot 始終是原定到期時刻；Twitch 收集仍記錄實際量測時間。
 
-Twitch 以外的六種工作會分別查五種 active 狀態，再分頁檢查最近執行紀錄。找到同 slot 的成功 run 就略過；同 slot 已失敗、取消或略過也不自動重送，避免每日 reset 被重複執行。成長／Followers 另查同 concurrency 群組的已知工作；Followers 也等待每日發現工作完成，避免新派發替換另一條流程已排隊的工作。三個相關手動一次性 workflow 僅列為 active blockers，不列入排程或 dispatch 清單。
+Twitch 以外的工作會查 active 狀態與分頁執行紀錄。同 slot 已嘗試不重送；每日候選與 Steam 成長另每六小時檢查，當天任一完整成功便跳過後續時段，失敗／取消／未執行則在下一檢查時段重試，仍在排隊或執行時等待。日期以 Asia/Taipei 計算，讀取範圍從當日午夜開始，不把前日成功沿用到今天。每日候選只採信當日有效排程 slot，手動的一個批次續跑不算每日刷新成功；同日重试續用已保存的候選進度，不再次重設。成長需該次 run 的 `Require complete growth coverage` 步驟成功，429、部分量測、錯誤或覆蓋不足會在保存／發布成果後使 workflow 失敗，舊版顯示成功卻沒有此驗證的 run 不阻止重試。成長／Followers 另查同 concurrency 群組的已知工作；候選重試與整點 Followers 同時到期時先檢查候選，候選需執行或等待時該輪 Followers 等待，避免尚未可見的派發競爭。三個相關手動一次性 workflow 僅列為 active blockers，不列入排程或 dispatch 清單。
 
 缺少 Secret、目的地設定不符、403、重新導向或不完整回應都會阻擋該工作；某個儲存庫的權限問題不會停用既有 Twitch 工作。Worker 在同一 isolate 內另有進行中檢查與已派發 slot 保護，HTTP timeout 也不盲目重送。這是記憶體保護，不能代替 workflow 持久 slot guard，也不宣稱跨 isolate 的 exactly-once。
 
@@ -156,6 +156,8 @@ Worker 結構化日誌只包含結果代碼、時段與執行 ID，不輸出 tok
 | `dispatch` / `missing_published_collection` | GitHub 已接受 Twitch 觸發；尚未代表資料已更新 |
 | `dispatch` / `scheduled_slot_due` | GitHub 已接受其他工作到期時段的觸發 |
 | `skip` / `slot_completed` | 同 slot 已有成功執行紀錄 |
+| `skip` / `day_already_completed` | 每日候選或成長在同一台灣日期已完整成功，後續六小時檢查略過 |
+| `wait` / `daily_refresh_priority` | 同分鐘候選需重試／等待，Followers 補漏等待下一輪 |
 | `skip` / `slot_already_attempted` | 同 slot 已有執行紀錄，即使失敗也不自動重送 |
 | `wait` / `slot_dispatch_attempted` | 本 isolate 已嘗試派發同 slot，避免 timeout 後盲目重送 |
 | `skip` / `stale_cron_delivery` | 延遲事件已跨過工作允許的小時或台灣日期 |

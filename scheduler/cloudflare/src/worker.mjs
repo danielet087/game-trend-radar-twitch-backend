@@ -173,11 +173,12 @@ async function activeRun(fetchImpl, settings) {
   return null;
 }
 
-async function recentRuns(fetchImpl, settings, slot) {
-  const since = new Date(timestamp(slot) - 2 * HOUR_MS).toISOString().replace(".000Z", "Z");
+async function recentRuns(fetchImpl, settings, slot, wholeDay = false) {
+  const since = wholeDay ? new Date(`${taipeiDay(slot)}T00:00:00+08:00`).toISOString().replace(".000Z", "Z") :
+    new Date(timestamp(slot) - 2 * HOUR_MS).toISOString().replace(".000Z", "Z");
   const runs = new Map();
   for (let page = 1; page <= MAX_RUN_PAGES; page += 1) {
-    const result = await fetchRuns(fetchImpl, settings, { created: `>=${since}`, per_page: RUNS_PER_PAGE, page });
+    const result = await fetchRuns(fetchImpl, settings, { created: `>=${since}`, branch: settings.branch, per_page: RUNS_PER_PAGE, page });
     for (const run of result.workflow_runs) {
       if (!Number.isSafeInteger(run.id) || run.id <= 0 || typeof run.status !== "string") {
         throw new WatchdogError("github_run_invalid_shape");
@@ -253,13 +254,14 @@ export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetc
 export const SCHEDULE_JOBS = Object.freeze([
   { id: "twitch", repo: "game-trend-radar-twitch-backend", workflow: "369223512", enabled: true, minute: 5 },
   { id: "steam_daily", repo: "game-trend-radar-backend", workflow: "steam-two-phase.yml", enabled: false,
-    minute: 0, taipeiHours: [0], inputs: { refresh_today: "true" } },
+    minute: 0, taipeiHours: [0, 6, 12, 18], oncePerDay: true, inputs: { refresh_today: "true" } },
   { id: "steam_catchup", repo: "game-trend-radar-backend", workflow: "steam-official-daily-catchup-250.yml", enabled: false,
     minute: 0, taipeiHours: Array.from({ length: 21 }, (_, index) => index + 3),
     blockingWorkflows: ["steam-public-growth.yml", "steam-two-phase.yml", "steam-official-backlog-oneoff-20260923.yml",
       "steam-official-nearfirst-batch-once.yml", "steam-official-hour-stress-once.yml"] },
   { id: "steam_growth", repo: "game-trend-radar-backend", workflow: "steam-public-growth.yml", enabled: false,
-    minute: 15, taipeiHours: [1], blockingWorkflows: ["steam-official-daily-catchup-250.yml", "steam-official-backlog-oneoff-20260923.yml",
+    minute: 15, taipeiHours: [1, 7, 13, 19], oncePerDay: true, completionStep: "Require complete growth coverage",
+    blockingWorkflows: ["steam-official-daily-catchup-250.yml", "steam-official-backlog-oneoff-20260923.yml",
       "steam-official-nearfirst-batch-once.yml", "steam-official-hour-stress-once.yml"] },
   { id: "steam_content", repo: "game-trend-radar-content-backend", workflow: "steam-catalog-reconcile.yml", enabled: false,
     minute: 30, taipeiHours: [7, 19] },
@@ -330,6 +332,45 @@ function namedForSlot(run, slot) {
     run.display_title.split(/\s*[|·]\s*/).includes(`slot=${slot}`);
 }
 
+function dailySuccessCandidates(job, runs, slot, now) {
+  const day = taipeiDay(slot);
+  return runs.filter((run) => {
+    if (run.status !== "completed" || run.conclusion !== "success") return false;
+    const created = timestamp(run.created_at), completed = timestamp(run.updated_at);
+    if (created > now + CLOCK_TOLERANCE_MS || completed > now + CLOCK_TOLERANCE_MS || completed < created) {
+      throw new WatchdogError("github_run_invalid_completion_time");
+    }
+    if (taipeiDay(created) !== day || taipeiDay(completed) !== day) return false;
+    const scheduled = job.taipeiHours.some((hour) => namedForSlot(run,
+      new Date(`${day}T${String(hour).padStart(2, "0")}:${String(job.minute).padStart(2, "0")}:00+08:00`)
+        .toISOString().replace(".000Z", "Z")));
+    // Daily discovery's manual runs can advance one batch with refresh_today=false;
+    // their successful conclusion does not prove today's daily refresh completed.
+    const manualGrowth = job.id === "steam_growth" && typeof run.display_title === "string" &&
+      run.display_title.split(/\s*[|·]\s*/).includes("slot=manual");
+    return scheduled || manualGrowth;
+  });
+}
+
+async function validatedDailySuccess(job, runs, settings, slot, fetchImpl, now) {
+  for (const run of dailySuccessCandidates(job, runs, slot, now)) {
+    if (!job.completionStep) return run;
+    // Older growth workflows reported success even after partial/429 collection.
+    // Require the explicit coverage gate, after publication, in this exact run.
+    const response = await request(fetchImpl,
+      `${API_ROOT}/repos/${settings.owner}/${settings.repo}/actions/runs/${run.id}/jobs?per_page=100`,
+      apiOptions(settings.token), "github_jobs");
+    const result = await readJson(response, "github_jobs");
+    if (!result || !Number.isInteger(result.total_count) || result.total_count < 1 ||
+        !Array.isArray(result.jobs) || result.jobs.length !== result.total_count) {
+      throw new WatchdogError("github_jobs_invalid_shape");
+    }
+    if (result.jobs.some((entry) => Array.isArray(entry.steps) && entry.steps.some((step) =>
+      step.name === job.completionStep && step.status === "completed" && step.conclusion === "success"))) return run;
+  }
+  return null;
+}
+
 // These maps close duplicate delivery races within one Worker isolate only.
 // Durable protection remains the workflow's concurrency-held slot guard.
 const inflightJobs = new Set();
@@ -347,6 +388,11 @@ async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
   inflightJobs.add(job.id);
   try {
     const jobSettings = settingsForJob(settings, job);
+    const dailyRuns = job.oncePerDay ? await recentRuns(fetchImpl, jobSettings, slot, true) : null;
+    if (dailyRuns) {
+      const success = await validatedDailySuccess(job, dailyRuns, jobSettings, slot, fetchImpl, now);
+      if (success) return { ...base, action: "skip", reason: "day_already_completed", run_id: success.id };
+    }
     // GitHub concurrency retains just one pending run per group. Inspect known
     // group peers before dispatch so a new hourly run does not replace a pending
     // growth run. Catchup also waits for daily discovery to finish updating data.
@@ -358,12 +404,12 @@ async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
     const activeCheck = blockingChecks.find((result) => result.value.active);
     if (activeCheck) return { ...base, action: "wait", reason: "workflow_active",
       run_id: activeCheck.value.active.id, blocking_workflow: activeCheck.value.workflow };
-    const runs = await recentRuns(fetchImpl, jobSettings, slot);
+    const runs = dailyRuns || await recentRuns(fetchImpl, jobSettings, slot);
     const justStarted = runs.find((run) => run.status !== "completed");
     if (justStarted) return { ...base, action: "wait", reason: "workflow_active", run_id: justStarted.id };
     const matching = runs.filter((run) => namedForSlot(run, slot));
     if (matching.length) {
-      const success = matching.find((run) => run.conclusion === "success");
+      const success = !job.oncePerDay && matching.find((run) => run.conclusion === "success");
       return { ...base, action: "skip", reason: success ? "slot_completed" : "slot_already_attempted",
         run_id: (success || matching[0]).id };
     }
@@ -407,7 +453,7 @@ export async function checkScheduledJobs(env, {
   }
   // Isolate failures: an inaccessible Steam or frontend repo cannot disable the
   // working Twitch monitor. Every network request retains timeout/redirect rules.
-  return Promise.all(due.map(async ({ job_id, target_slot }) => {
+  const checkDue = async ({ job_id, target_slot }) => {
     if (!enabled.has(job_id)) return { job_id, target_slot, action: "skip", reason: "job_staged" };
     const hourly = ["twitch", "steam_catchup", "frontend_insights"].includes(job_id);
     if (hourly ? hourSlot(epoch) !== hourSlot(scheduledEpoch) : taipeiDay(epoch) !== taipeiDay(scheduledEpoch)) {
@@ -422,7 +468,19 @@ export async function checkScheduledJobs(env, {
     } catch (error) {
       return { job_id, target_slot, action: "blocked", reason: safeReason(error) };
     }
+  };
+  // Daily retry slots share the minute with hourly Followers catchup. Check daily
+  // first so catchup cannot race its state refresh before GitHub exposes the run.
+  const dailyDue = due.find((item) => item.job_id === "steam_daily" && enabled.has(item.job_id));
+  if (!dailyDue) return Promise.all(due.map(checkDue));
+  const dailyResult = await checkDue(dailyDue);
+  const remaining = await Promise.all(due.filter((item) => item !== dailyDue).map((item) => {
+    if (item.job_id === "steam_catchup" && dailyResult.action !== "skip") {
+      return { ...item, action: "wait", reason: "daily_refresh_priority", blocking_workflow: "steam-two-phase.yml" };
+    }
+    return checkDue(item);
   }));
+  return [dailyResult, ...remaining];
 }
 
 export async function probeSchedulerPermissions(env, { fetchImpl = fetch } = {}) {

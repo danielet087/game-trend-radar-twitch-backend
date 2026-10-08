@@ -13,7 +13,7 @@ function run(slot, overrides = {}) {
     display_title: `Scheduled task | slot=${slot} | cloudflare`, created_at: slot, updated_at: slot, ...overrides };
 }
 
-function fixture({ runs = [], active = {}, activeWorkflows = {}, blockedRepo, dispatchError, responder } = {}) {
+function fixture({ runs = [], active = {}, activeWorkflows = {}, jobs = [], blockedRepo, dispatchError, responder } = {}) {
   const requests = [];
   const fetchImpl = async (input, options = {}) => {
     const url = new URL(input);
@@ -30,13 +30,15 @@ function fixture({ runs = [], active = {}, activeWorkflows = {}, blockedRepo, di
     }
     assert.equal(url.hostname, "api.github.com");
     assert.equal(options.headers.Authorization, "Bearer offline-fixture-only");
-    assert.ok(SCHEDULE_JOBS.some((job) => url.pathname.startsWith(`/repos/danielet087/${job.repo}/actions/workflows/`)));
+    assert.ok(SCHEDULE_JOBS.some((job) => url.pathname.startsWith(`/repos/danielet087/${job.repo}/actions/workflows/`)) ||
+      /^\/repos\/danielet087\/game-trend-radar-backend\/actions\/runs\/\d+\/jobs$/.test(url.pathname));
     if (blockedRepo && url.pathname.includes(`/repos/danielet087/${blockedRepo}/`)) return new Response("never log this body", { status: 403 });
     if (url.pathname.endsWith("/dispatches")) {
       assert.equal(options.method, "POST");
       if (dispatchError) throw new Error("private upstream details");
       return new Response(null, { status: 204 });
     }
+    if (url.pathname.endsWith("/jobs")) return json({ total_count: 1, jobs: [{ steps: jobs }] });
     if (!url.pathname.endsWith("/runs")) {
       const workflow = url.pathname.split("/").at(-1);
       return json({ id: 45678, state: "active", path: `.github/workflows/${workflow === "369223512" ? "collect.yml" : workflow}` });
@@ -77,7 +79,9 @@ test("Followers catchup is due only at Taiwan 03 through 23 inclusive", () => {
   for (let hour = 0; hour < 24; hour += 1) {
     const due = scheduledJobs(`2026-10-03T${String(hour).padStart(2, "0")}:00:00+08:00`);
     assert.equal(due.some((item) => item.job_id === "steam_catchup"), hour >= 3);
-    assert.equal(due.some((item) => item.job_id === "steam_daily"), hour === 0);
+    assert.equal(due.some((item) => item.job_id === "steam_daily"), [0, 6, 12, 18].includes(hour));
+    assert.equal(scheduledJobs(`2026-10-03T${String(hour).padStart(2, "0")}:15:00+08:00`)
+      .some((item) => item.job_id === "steam_growth"), [1, 7, 13, 19].includes(hour));
   }
   assert.deepEqual(scheduledJobs("2026-10-03T02:15:00+08:00"), []);
   assert.deepEqual(scheduledJobs("2026-10-03T12:30:00+08:00"), []);
@@ -183,7 +187,7 @@ test("a matching successful slot skips and all other completed conclusions also 
     const when = "2026-10-06T00:00:00+08:00";
     const api = fixture({ runs: [run(iso(when), { conclusion })] });
     const [result] = await check(api, when);
-    assert.equal(result.reason, conclusion === "success" ? "slot_completed" : "slot_already_attempted");
+    assert.equal(result.reason, conclusion === "success" ? "day_already_completed" : "slot_already_attempted");
     assert.equal(api.posts().length, 0);
   }
 });
@@ -343,4 +347,93 @@ test("read-only permission probe rejects redirects and inactive or swapped workf
 
 test("HTTP remains unavailable to callers even with all jobs enabled", async () => {
   assert.equal(worker.fetch(new Request("https://example.invalid/dispatch"), ENV, {}).status, 404);
+});
+
+const coverageGate = { name: "Require complete growth coverage", status: "completed", conclusion: "success" };
+const onlyJob = (id) => ({ ...ENV, RADAR_ENABLED_JOBS: id });
+
+test("daily failures retry six hours later, with the new exact slot and no extra same-slot dispatch", async () => {
+  for (const [id, first, next] of [
+    ["steam_daily", "2026-11-01T00:00:00+08:00", "2026-11-01T06:00:00+08:00"],
+    ["steam_growth", "2026-11-01T01:15:00+08:00", "2026-11-01T07:15:00+08:00"],
+  ]) {
+    const api = fixture({ runs: [run(iso(first), { conclusion: "failure" })] });
+    const result = (await check(api, next, onlyJob(id)))[0];
+    assert.equal(result.action, "dispatch");
+    assert.equal(JSON.parse(api.posts()[0].options.body).inputs.target_slot, iso(next));
+    assert.equal((await check(api, next, onlyJob(id)))[0].reason, "slot_dispatch_attempted");
+    assert.equal(api.posts().length, 1);
+  }
+});
+
+test("any validated success earlier today skips all later checks even if a later run failed", async () => {
+  for (const [id, first, later, final] of [
+    ["steam_daily", "2026-11-02T00:00:00+08:00", "2026-11-02T06:00:00+08:00", "2026-11-02T18:00:00+08:00"],
+    ["steam_growth", "2026-11-02T01:15:00+08:00", "2026-11-02T07:15:00+08:00", "2026-11-02T19:15:00+08:00"],
+  ]) {
+    const api = fixture({ runs: [run(iso(later), { id: 23457, conclusion: "failure" }), run(iso(first))], jobs: [coverageGate] });
+    const result = (await check(api, final, onlyJob(id)))[0];
+    assert.equal(result.reason, "day_already_completed");
+    assert.equal(result.run_id, 23456);
+    assert.equal(api.posts().length, 0);
+    const history = api.requests.find(({ url }) => url.searchParams.has("created"));
+    assert.equal(history.url.searchParams.get("created"), ">=2026-11-01T16:00:00Z");
+    assert.equal(history.url.searchParams.get("branch"), "main");
+  }
+});
+
+test("yesterday's success and a previous-day run ending today cannot suppress a new day", async () => {
+  const when = "2026-11-03T06:00:00+08:00";
+  const api = fixture({ runs: [
+    run("2026-11-02T10:00:00Z"),
+    run("2026-11-02T10:00:00Z", { id: 23457, updated_at: "2026-11-02T16:01:00Z" }),
+  ] });
+  assert.equal((await check(api, when, onlyJob("steam_daily")))[0].action, "dispatch");
+});
+
+test("an unvalidated legacy growth success retries rather than hiding partial measurements", async () => {
+  for (const [index, gate] of [null, { ...coverageGate, conclusion: "failure" }, { ...coverageGate, conclusion: "skipped" }].entries()) {
+    const date = `2026-11-${String(4 + index).padStart(2, "0")}`;
+    const api = fixture({ runs: [run(iso(`${date}T01:15:00+08:00`))], jobs: gate ? [gate] : [] });
+    assert.equal((await check(api, `${date}T07:15:00+08:00`, onlyJob("steam_growth")))[0].action, "dispatch");
+  }
+});
+
+test("complete manual growth can count today while a manual candidate continuation cannot", async () => {
+  const created = "2026-11-07T02:00:00Z";
+  for (const id of ["steam_daily", "steam_growth"]) {
+    const api = fixture({ runs: [run(created, { display_title: "Steam task | slot=manual | source=workflow_dispatch" })], jobs: [coverageGate] });
+    const when = id === "steam_daily" ? "2026-11-07T12:00:00+08:00" : "2026-11-07T13:15:00+08:00";
+    const result = (await check(api, when, onlyJob(id)))[0];
+    assert.equal(result.action, id === "steam_growth" ? "skip" : "dispatch");
+  }
+});
+
+test("daily history pagination finds an older success and refuses incomplete job coverage metadata", async () => {
+  const when = "2026-11-08T19:15:00+08:00";
+  const earlier = "2026-11-08T01:15:00+08:00";
+  const api = fixture({ runs: [
+    ...Array.from({ length: 10 }, (_, index) => run("2026-11-08T06:00:00Z", {
+      id: index + 1, conclusion: "failure", display_title: "manual maintenance",
+    })), run(iso(earlier)),
+  ], jobs: [coverageGate] });
+  assert.equal((await check(api, when, onlyJob("steam_growth")))[0].reason, "day_already_completed");
+  assert.ok(api.requests.some(({ url }) => url.searchParams.get("page") === "2"));
+  const invalid = fixture({ runs: [run(iso("2026-11-09T01:15:00+08:00"))], responder: (url) =>
+    url.pathname.endsWith("/jobs") ? json({ total_count: 2, jobs: [{ steps: [coverageGate] }] }) : null });
+  assert.equal((await check(invalid, "2026-11-09T07:15:00+08:00", onlyJob("steam_growth")))[0].reason, "github_jobs_invalid_shape");
+  assert.equal(invalid.posts().length, 0);
+});
+
+test("a six-hour candidate retry takes priority over the simultaneous hourly catchup", async () => {
+  const api = fixture({ runs: [run(iso("2026-11-10T00:00:00+08:00"), { conclusion: "failure" })] });
+  const results = await check(api, "2026-11-10T06:00:00+08:00");
+  assert.equal(results.find((item) => item.job_id === "steam_daily").action, "dispatch");
+  assert.equal(results.find((item) => item.job_id === "steam_catchup").reason, "daily_refresh_priority");
+  assert.equal(api.posts().length, 1);
+  const complete = fixture({ runs: [run(iso("2026-11-11T00:00:00+08:00"))] });
+  const afterSuccess = await check(complete, "2026-11-11T06:00:00+08:00");
+  assert.equal(afterSuccess.find((item) => item.job_id === "steam_daily").reason, "day_already_completed");
+  assert.equal(afterSuccess.find((item) => item.job_id === "steam_catchup").action, "dispatch");
+  assert.equal(complete.posts().length, 1);
 });
