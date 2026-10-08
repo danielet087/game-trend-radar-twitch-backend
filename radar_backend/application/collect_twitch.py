@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Callable, Protocol
 
+from radar_core.publication import snapshot_revision
+
 from radar_backend.domain.collection import CollectionInputs, CollectionRequest, TwitchCredentials
 
 
@@ -21,6 +23,12 @@ def collect_observations(
 ) -> dict:
     """Read all inputs before collection; leave storage/publication to the caller."""
     inputs = input_store.load(request)
+    source_revision = snapshot_revision({
+        "tracking_state": inputs.tracking_state,
+        "steam_catalog": inputs.steam_catalog,
+        "steam_mapping_state": inputs.steam_mapping_state,
+        "steam_discovery_state": inputs.steam_discovery_state,
+    })
     payload = collector(
         client_id=credentials.client_id,
         client_secret=credentials.client_secret,
@@ -48,4 +56,5 @@ def collect_observations(
             "run_id": run_id,
             "run_attempt": run_attempt,
         }
+    payload["input_revision"] = source_revision
     return payload

@@ -96,6 +96,11 @@ os.execv(real,[real,*sys.argv[1:]])
     assert set(saved_discovery['games']) == {'1', '2'}
     assert saved_discovery['updated_at'] == concurrent_discovery['updated_at']
     assert saved_latest['steam_discovery_state'] == saved_discovery
+    publication = json.loads((tmp_path/'twitch_publication.json').read_text())
+    assert publication['published_revision'] == git('--git-dir',remote,'rev-parse','main')
+    assert publication['attempts'] == 2
+    assert publication['input_kind'] == 'legacy_collected_snapshot'
+    assert publication['job_result']['successful'] is True
     assert 'fixture-only-token' not in run.stdout+run.stderr
 
 
