@@ -1,8 +1,4 @@
-"""Threshold discovery and stream census, separate from NEW-badge verification.
-
-Helix does not expose Twitch's NEW badge. Only dated, explicit observations
-may confirm it. The IGDB 30-day collection filter never changes that verdict.
-"""
+"""Canonical candidate collection composition."""
 
 from __future__ import annotations
 from collections import Counter
@@ -16,9 +12,13 @@ import time
 from typing import Any, Callable
 import requests
 from urllib3.util import Timeout
-from collectors.twitch_live import CollectionDeadlineExceeded, TwitchClient
-from collectors.twitch_audience import CACHE_PATH, FollowerResolver, attach_filtered_audience
-from collectors.twitch_newness import (
+from radar_backend.adapters.twitch_http import CollectionDeadlineExceeded, TwitchClient
+from radar_backend.adapters.twitch_audience import (
+    CACHE_PATH,
+    FollowerResolver,
+    attach_filtered_audience,
+)
+from radar_backend.adapters.twitch_newness import (
     RELEASE_DATES_PATH,
     SOURCE_RULES,
     attach_experiments,
@@ -27,7 +27,7 @@ from collectors.twitch_newness import (
     parse_timestamp,
     timestamp,
 )
-from collectors.twitch_tracking import (
+from radar_backend.adapters.twitch_tracking import (
     enroll_observation,
     normalize_tracking_state,
     reconcile_tracking_entry,
@@ -40,15 +40,9 @@ from radar_backend.state import twitch_candidates as _state
 from radar_backend.domain.twitch_candidates import IncompleteCollection
 
 LOGGER = logging.getLogger(__name__)
-REGISTRY_PATH = Path(__file__).resolve().parents[1] / "data/twitch_category_verification.json"
+REGISTRY_PATH = Path(__file__).resolve().parents[2] / "data/twitch_category_verification.json"
 IGDB_URL = "https://api.igdb.com/v4/games"
-NON_GAME_IDS = {
-    "509658": "Just Chatting",
-    "509672": "IRL",
-    "509663": "Special Events",
-    "509659": "ASMR",
-    "26936": "Music",
-}
+NON_GAME_IDS = _rules.NON_GAME_IDS
 
 
 def load_verifications(path: str | Path = REGISTRY_PATH) -> dict[str, dict[str, Any]]:

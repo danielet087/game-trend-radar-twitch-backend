@@ -1,5 +1,5 @@
 """Validate durable input documents before opening a collection client."""
-from collectors.twitch_tracking import normalize_tracking_state
+from radar_backend.domain.twitch_tracking import normalize_tracking_state
 from radar_backend.domain.time import parse_time
 
 

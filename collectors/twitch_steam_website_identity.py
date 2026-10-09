@@ -16,7 +16,7 @@ import requests
 from urllib3.util import Timeout
 
 from collectors.steam_twitch_mapping import _deadline, _id, _now, _pages
-from collectors.twitch_newness import parse_timestamp, timestamp
+from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
 
 METHOD = "twitch_igdb_steam_website_v1"
 PROVIDER = "Steam Store appdetails cc=TW l=tchinese"

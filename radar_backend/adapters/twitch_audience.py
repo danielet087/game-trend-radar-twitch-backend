@@ -1,4 +1,4 @@
-"""Compatibility facade for follower-qualified audience statistics."""
+"""Compose follower audience rules, HTTP and runner-local cache ports."""
 
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ from radar_backend.application import twitch_audience as _application
 from radar_backend.domain import twitch_audience as _rules
 from radar_backend.adapters import twitch_followers as _transport
 from radar_backend.state import twitch_followers as _cache
-from collectors.twitch_live import TWITCH_API_BASE, TwitchClient
-from collectors.twitch_newness import parse_timestamp, timestamp
+from radar_backend.adapters.twitch_http import TWITCH_API_BASE, TwitchClient
+from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("collectors.twitch_audience")
 RULE = _rules.RULE
 CACHE_PATH = Path(".cache/twitch_followers.json")
 MAX_AGE = _rules.MAX_AGE

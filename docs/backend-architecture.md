@@ -1,6 +1,6 @@
-# Twitch 後端分層與發布（第二、三批）
+# Twitch 後端分層與發布
 
-本次把收集入口、輸入狀態、HTTP、用例與執行摘要拆成可獨立呼叫的責任。既有 feature collectors 保留，不改 Twitch／Steam 收錄、IGDB／外部身分對照、日期窗口或人數計算。
+第二、三批先把收集入口、輸入狀態、HTTP、用例與執行摘要拆成可獨立呼叫的責任，並加入共用 Git 發布。第十四批繼續拆分收集、追蹤、audience 與固定前端輸入；Twitch／Steam 收錄、IGDB／外部身分對照、日期窗口及人數計算維持原契約。
 
 | 責任 | 實作 | 邊界 |
 |---|---|---|
@@ -36,10 +36,45 @@ publication 在刷新目的地前只讀一次完整收集 JSON。每次 Git push
 
 `output/twitch_publication.json` 只在實際 push 成功後產生，包含 typed `job_result`、提交 revision 與重試次數。沒有內容差異仍必須取得真實 push 確認；有限次拒絕、fetch／merge／commit 失敗均不得冒充發布成功。每次 recovery 先清除此路徑的舊回條，原收集 JSON 保留不動。workflow 追加短期回條 artifact，原觸發方式、concurrency、Secrets、收集期限及正常排程保留。`git_frontend_auth.sh` 繼續用 askpass，token 不放 URL、argv 或 Git config。
 
+## 第十四批：收集、追蹤與固定前端輸入
+
+| 責任 | 位置 |
+| --- | --- |
+| Badge 驗證、串流資料與 IGDB hints 列的純規則 | `domain/twitch_candidates.py` |
+| Helix 預算與完整 census、候選／已追蹤觀測協調 | `application/twitch_candidates.py` |
+| Registry JSON 讀取、IGDB hints HTTP 與 canonical 收集接線 | `state/twitch_candidates.py`、`adapters/igdb_release_hints.py`、`adapters/twitch_candidates.py` |
+| Followers 快取資格與 audience 統計／排序規則 | `domain/twitch_audience.py` |
+| 有時限 follower lookup、filtered metrics 與 finally 保存 | `application/twitch_audience.py` |
+| Followers HTTP、runner cache 原子保存與接線 | `adapters/twitch_followers.py`、`state/twitch_followers.py`、`adapters/twitch_audience.py` |
+| 來源成員聯集、收錄證據與追蹤期限 | `domain/twitch_tracking.py`、`adapters/twitch_tracking.py` |
+| 分來源日期窗口、provenance、retrospective 比對 | `domain/twitch_newness.py` |
+| Release-date JSON 讀取與時間／規則接線 | `state/twitch_newness.py`、`adapters/twitch_newness.py` |
+| 固定 frontend commit 的四份輸入協調 | `application/frontend_inputs.py` |
+| 原 Git HEAD／urllib 傳輸與輸入接線 | `adapters/frontend_input_http.py`、`adapters/frontend_inputs.py` |
+| canonical CLI | `jobs/collect_twitch.py`、`jobs/load_frontend_inputs.py` |
+
+上表路徑皆相對於 `radar_backend/`。Domain 不讀實際時鐘、HTTP 或檔案；application 使用明確的時鐘、來源、validator、census、resolver 與 cache ports；adapter 組裝原 TwitchClient、Core 與具體來源。原四個 feature collectors 與 tracking loader 保留薄相容入口，公開參數、預設綁定、class fields、當下 helper／HTTP／clock／logger 及錯誤範圍保持。新的兩個 CLI main 與原入口同 AST；正式 workflow 仍可使用原命令。
+
+正式 CLI、input validation、尚未拆分的 mapping／discovery／website 與 snapshot／recovery 工具直接匯入新 owner。這些剩餘工具本批僅更換 import，不更改其來源判定、保存或 CLI body；既有具體 mapping／discovery 用明確 callbacks 接入收集用例。共用 publication 本體與 TwitchClient 沒有改動，仍在凍結輸入後向最新前端合併、有限重試並等待實際 push 回條。
+
+Census 保留 1,500 秒共用期限、1,200 Helix 次數與所有既有分頁設定。PageReader 先查 deadline 再查 budget，請求後再次查 deadline；不完整分頁、重複 cursor、改變分類、非法人數或非 live stream 都會停止整輪輸出。類別以 ID 一輪只觀測一次；直播主以 ID 保存最新列並只計一次，measurement 起訖仍來自真實收集時鐘。Metadata 不明或失敗仍保持 unknown，不能藉此排除分類；排除頁與重複頁不會誤判為觀看門檻邊界。
+
+初次 Twitch 收錄保留 7,000 人門檻與既有證據，已收錄成員則獨立持續觀測，排行榜缺席、觀看下降或 badge 消失不會移除有效追蹤。Twitch 與每個 Steam AppID 的來源成員按 Twitch ID 聯集；只要一個來源仍有效就保持 active。Steam 未上市不能提前成為近期上市成員，Twitch 的未上市證據可保持原追蹤；IGDB 日期仍優先於較弱的 Twitch 日期，30 天期限、永久排除、catalog 移除與 mapping 變更規則保持。真實完整零人數 census 可保存，失敗 census 不偽裝成零，也不替換先前觀測。
+
+Followers 只查 public total，使用既有 app token 與同一 client。快取有效期保留 24 小時半開區間；未知 total 單輪不重試、超過 1,000 Followers 且至少 10 viewers 才進 filtered audience，有任何未知值則 median 保持空值。每 50 個成功查詢保存一次 cache，結尾及例外路徑仍 finally 保存；次數／時間／collection deadline、三次連續失敗、429／401／403 停止與已快取結果可在停止後使用的行為保持。Cache 的 JSON 格式、tempfile、atomic replace、清理與 IO 容錯範圍不變。
+
+Newness 日期試驗保留 Twitch originalReleaseDate 14 天、IGDB 30 天與 metadata 24 小時窗口，涵蓋未上市日期，並保持其無法證實官方 NEW badge 的來源標記。已用於收集的 IGDB 決定會被重用，避免跨 30 天邊界造成接受觀測與報告矛盾；retrospective 比對仍以 badge 的觀測時間評估，不冒稱同時觀測。
+
+Frontend loader 每輪只取得一次 HEAD，再按 tracking → Steam catalog → mapping → discovery 讀同一 immutable commit；catalog 先驗證才繼續。只有 mapping／discovery 的 HTTP 404 可建立原 bootstrap 空表，required 檔案缺失、其他 HTTP 錯誤、損毀 JSON 或無效狀態會停止。原 headers、20／30 秒 timeout、commit 驗證、來源標記與例外順序保持。
+
+本批接在 Twitch 第三批 PR #3，並保留其他後端相依 PR 的既有順序。四個 workflows、scheduler、Secrets、requirements、Core 0.2.0 immutable SHA `bf1d4bc64b361ec35cd4041d78c5016396d5d785`、data 與 publication 本體均不變。本次離線驗證包含原／新公開 API、完整 fake API 收集、blocked legacy imports、固定快照輸入、來源不可變、實際 bare Git 出版及乾淨 checkout。
+
+剩餘為 Twitch mapping／discovery／website identity／snapshot 一批、Content 共用 metadata／文字規則一批，再做四個 consumer 總驗收，預留一次修正，估計再 3～4 次。完成界線沿用原四 consumer，前端 UI、IGDB 獨立後端及全面重寫退役工具另列範圍。
+
 ## 仍待拆分
 
-- `collectors/twitch_candidates.py` 的分頁掃描、日期 metadata 查詢、來源 reconciliation 與 audience enrichment 仍在既有 feature 模組；本批先隔離入口與外部依賴，不搬動已驗證的資格邏輯。
-- immutable frontend 載入的 HTTP 仍留在既有 input loader；同一次載入全部讀取相同固定 frontend commit，發布則使用共用 Git adapter。
+- Twitch 的 Steam／IGDB／Helix mapping、反向 discovery、website identity 與 snapshot projection／合併尚在既有具體來源及保存模組；下一批繼續拆分這些責任。
+- 固定 frontend 載入已使用新 application／HTTP／composition；collection guard 的獨立時段檢查保持原入口，發布繼續使用共用 Git adapter。
 - 本批未修改 IGDB console 的獨立發布入口、掃描邏輯或排程；共用 core 更新固定提交依賴，不增加外部 runtime 套件。
 
 ## 離線驗證

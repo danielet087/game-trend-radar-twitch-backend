@@ -15,9 +15,9 @@ from typing import Callable
 import requests
 
 from collectors.steam_twitch_mapping import _deadline, _error, _id, _now, _pages
-from collectors.twitch_live import CollectionDeadlineExceeded
-from collectors.twitch_newness import parse_timestamp, timestamp
-from collectors.twitch_tracking import normalize_tracking_state
+from radar_backend.domain.twitch import CollectionDeadlineExceeded
+from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
+from radar_backend.adapters.twitch_tracking import normalize_tracking_state
 
 METHOD = "twitch_igdb_external_steam_v1"
 POLICY_VERSION = 2

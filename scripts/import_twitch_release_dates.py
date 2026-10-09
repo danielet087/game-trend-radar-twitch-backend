@@ -5,8 +5,8 @@ import argparse
 import json
 from pathlib import Path
 
-from collectors.twitch_live import write_json
-from collectors.twitch_newness import RELEASE_DATES_PATH, load_release_dates, parse_timestamp, timestamp
+from radar_backend.state.json_snapshot import write_json
+from radar_backend.adapters.twitch_newness import RELEASE_DATES_PATH, load_release_dates, parse_timestamp, timestamp
 
 
 def extract_records(payload: object, *, source_name: str, source_url: str, observed_at: str | None = None) -> dict:
