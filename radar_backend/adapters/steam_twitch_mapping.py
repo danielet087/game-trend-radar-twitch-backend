@@ -1,4 +1,4 @@
-"""Compatibility facade for authoritative Steam/IGDB/Twitch identity links."""
+"""Compose authoritative Steam/IGDB/Twitch mapping rules and source ports."""
 
 from __future__ import annotations
 

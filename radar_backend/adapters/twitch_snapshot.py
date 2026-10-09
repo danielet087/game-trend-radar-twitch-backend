@@ -1,4 +1,4 @@
-"""Compatibility entry points for complete Twitch snapshots and Taipei history."""
+"""Canonical snapshot composition with call-time validation and storage ports."""
 
 from __future__ import annotations
 
@@ -152,16 +152,3 @@ def store_snapshot(payload: dict, frontend: Path) -> str:
         latest_observation_fn=rules.latest_observation,
         collection_receipt_fn=rules.collection_receipt,
     )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("snapshot")
-    parser.add_argument("frontend")
-    args = parser.parse_args()
-    payload = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
-    print(store_snapshot(payload, Path(args.frontend)))
-
-
-if __name__ == "__main__":
-    main()

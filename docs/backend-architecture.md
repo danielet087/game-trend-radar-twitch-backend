@@ -1,6 +1,6 @@
 # Twitch 後端分層與發布
 
-第二、三批先把收集入口、輸入狀態、HTTP、用例與執行摘要拆成可獨立呼叫的責任，並加入共用 Git 發布。第十四批繼續拆分收集、追蹤、audience 與固定前端輸入；Twitch／Steam 收錄、IGDB／外部身分對照、日期窗口及人數計算維持原契約。
+第二、三批先把收集入口、輸入狀態、HTTP、用例與執行摘要拆成可獨立呼叫的責任，並加入共用 Git 發布。第十四批拆分收集、追蹤、audience 與固定前端輸入，第十五批完成 mapping、discovery、website identity 與 snapshot 的分層；Twitch／Steam 收錄、IGDB／外部身分對照、日期窗口及人數計算維持原契約。
 
 | 責任 | 實作 | 邊界 |
 |---|---|---|
@@ -9,7 +9,7 @@
 | adapters | `radar_backend/adapters/twitch_http.py` | Twitch OAuth／Helix client、既有重試、請求間隔與期限 |
 | state | `radar_backend/state/json_inputs.py`、`validation.py`、`json_snapshot.py` | JSON 讀取／驗證與本機快照寫入；損毀狀態不替換成空表 |
 | jobs | `radar_backend/jobs/twitch.py`、`twitch_cli.py`、`twitch_report.py` | 參數、環境、憑證檢查、用例協調與文字摘要 |
-| 既有 collector | `collectors/twitch_candidates.py` 及 tracking／audience／mapping 模組 | 繼續負責候選掃描、已收錄持續觀測、來源對照與統計規則 |
+| 相容入口 | `collectors/` 中的 feature 模組、`scripts/store_twitch_snapshot.py` | 薄 façade 注入原入口當下的 helpers，正式 composition 使用 `radar_backend/` owner |
 | publication | `radar_backend/publication/twitch.py`、`radar_core.publication` | 凍結收集輸出，對最新前端合併，限指定 JSON 的單一 commit，有限次重試並等待實際 push 確認 |
 | publication job | `radar_backend/jobs/publish_twitch.py`、`scripts/publish_frontend.sh` | 憑證／CLI、暫存 clone、安全 Git adapter、成功後的發布回條；shell 僅保留相容入口 |
 
@@ -69,11 +69,37 @@ Frontend loader 每輪只取得一次 HEAD，再按 tracking → Steam catalog �
 
 本批接在 Twitch 第三批 PR #3，並保留其他後端相依 PR 的既有順序。四個 workflows、scheduler、Secrets、requirements、Core 0.2.0 immutable SHA `bf1d4bc64b361ec35cd4041d78c5016396d5d785`、data 與 publication 本體均不變。本次離線驗證包含原／新公開 API、完整 fake API 收集、blocked legacy imports、固定快照輸入、來源不可變、實際 bare Git 出版及乾淨 checkout。
 
-剩餘為 Twitch mapping／discovery／website identity／snapshot 一批、Content 共用 metadata／文字規則一批，再做四個 consumer 總驗收，預留一次修正，估計再 3～4 次。完成界線沿用原四 consumer，前端 UI、IGDB 獨立後端及全面重寫退役工具另列範圍。
+第十四批結束時估計剩餘 3～4 次；第十五批完成下列 Twitch 身分與保存拆分後，剩餘 Content 共用 metadata／文字規則及四個 consumer 總驗收，預留一次修正，估計再 2～3 次。完成界線沿用原四 consumer，前端 UI、IGDB 獨立後端及全面重寫退役工具另列範圍。
+
+## 第十五批：來源身分與快照保存
+
+| 責任 | 位置 |
+| --- | --- |
+| Steam catalog／mapping 驗證、台灣日期資格與反向 cache 的純規則 | `domain/steam_twitch_mapping.py` |
+| Steam → IGDB → Helix 的 refresh、批次確認與 metadata-only 協調 | `application/steam_twitch_mapping.py` |
+| IGDB request／分頁／deadline 與 mapping 接線 | `adapters/igdb_identity.py`、`adapters/steam_twitch_mapping.py` |
+| Twitch discovery registry、資格、來源與身分證據驗證 | `domain/twitch_steam_discovery.py` |
+| 反向 ID discovery、缺失 Helix IGDB ID 的官方 fallback 與 website 查詢協調 | `application/twitch_steam_discovery.py`、`adapters/twitch_steam_discovery.py` |
+| Steam URL、確切商店日期、website proof 與 metadata 驗證 | `domain/twitch_steam_website_identity.py` |
+| IGDB game／website ownership 與 Steam metadata 查詢協調 | `application/twitch_steam_website_identity.py` |
+| 固定 Steam appdetails HTTP 與 website 接線 | `adapters/steam_identity_http.py`、`adapters/twitch_steam_website_identity.py` |
+| 三 registry 合併、census／schedule／receipt 驗證與 history 投影 | `domain/twitch_snapshot.py` |
+| 保持順序的本機快照讀寫與接線 | `state/twitch_snapshot.py`、`adapters/twitch_snapshot.py` |
+| canonical 保存 CLI | `jobs/store_twitch_snapshot.py` |
+
+上表路徑皆相對於 `radar_backend/`。純規則不讀 HTTP、檔案或實際時鐘；流程以明確 callbacks 接入 clock、API、normalizers、proof 與錯誤類型。原三個 identity collectors 與 snapshot script 保留同簽名的薄相容入口及當下 globals；正式 collection、frontend inputs、persisted validation、metadata reconciliation 與 publication 直接使用 canonical owner。Core admission 函式直接 re-export 同一物件，不新增規則副本。
+
+映射仍只接受 Steam AppID → 官方 IGDB external source／game → Helix IGDB ID 的鏈結，不使用名稱猜測。確定映射重用、每日負向決定重試、Taipei 日界與 30 天窗口保持；metadata-only refresh 不開啟 HTTP，也不改變觀眾量測。反向 discovery 只處理真實 Twitch 收錄來源，保留多個官方 Steam AppID、24 小時 cache、缺失 Helix IGDB ID 的官方 fallback 與既有排除；website proof 不能冒稱 external-games 鏈結或公開 catalog 成員。
+
+Website 只使用已驗證的 IGDB game／website ownership 及固定 Steam appdetails endpoint。URL／AppID／proof 必須一致；不跟隨任意 URL、redirect，不把失敗或不確定日期當成成功證據。HTTP params、headers、timeout、deadline 檢查點、錯誤範圍與先後順序保持。
+
+Snapshot 在原讀檔及完整驗證順序後保存真實小時 history、latest、tracking、mapping、discovery 與時段 status；同一來源的較新決定及獨立來源聯集保持。延遲 census 可補歷史及來源證據，不倒退 latest／receipt，不改量測時間。History 永久累積，沒有新增清理期限；本機保存不代表 Git 已確認發布。共用 Git engine、凍結輸入、push 競爭重合併與成功回條本體均不變。
+
+本批接在 Twitch 第十四批 PR #4。既有 workflows、排程、Secrets、Core immutable revision、requirements 與 data 保持；離線測試涵蓋原／新 API、正式 collection → identity → snapshot、無 API 的 metadata refresh、阻擋舊 owners 的完整 import graph、canonical CLI、獨立原 source 語意 oracle、精確檔案 checkout 與實際 bare Git 發布。
 
 ## 仍待拆分
 
-- Twitch 的 Steam／IGDB／Helix mapping、反向 discovery、website identity 與 snapshot projection／合併尚在既有具體來源及保存模組；下一批繼續拆分這些責任。
+- Twitch 正式收集、來源身分、固定輸入與快照保存已分層；下一批處理 Content 共用 metadata／文字規則，再做四個 consumer 總驗收。
 - 固定 frontend 載入已使用新 application／HTTP／composition；collection guard 的獨立時段檢查保持原入口，發布繼續使用共用 Git adapter。
 - 本批未修改 IGDB console 的獨立發布入口、掃描邏輯或排程；共用 core 更新固定提交依賴，不增加外部 runtime 套件。
 

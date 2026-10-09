@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from collectors.steam_twitch_mapping import normalize_steam_catalog
+from radar_backend.adapters.steam_twitch_mapping import normalize_steam_catalog
 from radar_backend.domain.collection import CollectionInputs, CollectionRequest
 from radar_backend.state.validation import (
     validate_persisted_discovery, validate_persisted_mapping, validate_persisted_tracking,

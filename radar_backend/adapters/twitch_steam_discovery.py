@@ -1,4 +1,4 @@
-"""Legacy discovery composition retaining original runtime helper bindings."""
+"""Canonical reverse discovery composition and public compatibility contract."""
 
 from __future__ import annotations
 
@@ -10,10 +10,16 @@ from typing import Callable
 
 import requests
 
-from collectors.steam_twitch_mapping import _deadline, _error, _id, _now, _pages
+from radar_backend.adapters.steam_twitch_mapping import (
+    _deadline,
+    _error,
+    _id,
+    _now,
+    _pages,
+)
 from radar_backend.domain.twitch import CollectionDeadlineExceeded
 from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
-from radar_backend.adapters.twitch_tracking import normalize_tracking_state
+from radar_backend.domain.twitch_tracking import normalize_tracking_state
 from radar_backend.domain import twitch_steam_discovery as _rules
 from radar_backend.application import twitch_steam_discovery as _application
 
@@ -40,13 +46,17 @@ FAILURES = (
 
 
 def _normalize_website_identity(value, twitch_id, igdb_id):
-    from collectors.twitch_steam_website_identity import normalize_website_identity
+    from radar_backend.adapters.twitch_steam_website_identity import (
+        normalize_website_identity,
+    )
 
     return normalize_website_identity(value, twitch_id, igdb_id)
 
 
 def _website_lookup():
-    from collectors.twitch_steam_website_identity import lookup_website_identity
+    from radar_backend.adapters.twitch_steam_website_identity import (
+        lookup_website_identity,
+    )
 
     return lookup_website_identity
 

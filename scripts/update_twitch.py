@@ -13,7 +13,7 @@ from radar_backend.state.json_snapshot import write_json
 from radar_backend.adapters.twitch_candidates import REGISTRY_PATH, collect_candidates as collect_twitch
 from radar_backend.adapters.twitch_newness import RELEASE_DATES_PATH
 from radar_backend.adapters.twitch_audience import CACHE_PATH
-from collectors.steam_twitch_mapping import normalize_steam_catalog
+from radar_backend.adapters.steam_twitch_mapping import normalize_steam_catalog
 from radar_backend.domain.collection import CollectionRequest
 from radar_backend.domain.time import validate_slot
 from radar_backend.jobs.twitch import run_collection_job
