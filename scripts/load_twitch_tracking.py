@@ -65,7 +65,7 @@ def load_published_tracking() -> dict:
 
 
 def load_published_inputs() -> dict:
-    from collectors.steam_twitch_mapping import normalize_steam_catalog
+    from radar_backend.adapters.steam_twitch_mapping import normalize_steam_catalog
 
     return application.load_published_inputs(
         frontend_head=frontend_head,
