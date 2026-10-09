@@ -11,8 +11,8 @@ import re
 
 import requests
 
-from collectors.twitch_live import TwitchClient
-from collectors.twitch_newness import timestamp
+from radar_backend.adapters.twitch_http import TwitchClient
+from radar_backend.domain.twitch_newness import timestamp
 
 ENDPOINT = "https://api.igdb.com/v4/games"
 DEFAULT_GAME_ID = "366896"

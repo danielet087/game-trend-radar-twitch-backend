@@ -1,4 +1,4 @@
-"""Offline, source-labelled trial of Glance's release-date NEW heuristic.
+"""Compose offline, source-labelled release-date experiments.
 
 This module never requests Twitch's website or private GraphQL service.
 Twitch dates must come from an explicitly dated response/dataset export.
@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from radar_backend.domain import twitch_newness as rules
 from radar_backend.state import twitch_newness as storage
 
-RELEASE_DATES_PATH = Path(__file__).resolve().parents[1] / "data/twitch_release_dates.json"
+RELEASE_DATES_PATH = Path(__file__).resolve().parents[2] / "data/twitch_release_dates.json"
 MAX_METADATA_AGE = timedelta(hours=24)
 SOURCES = ("twitch_original_release_date", "igdb_first_release_date")
 SOURCE_RULES = {

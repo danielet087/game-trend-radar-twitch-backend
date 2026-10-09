@@ -1,11 +1,11 @@
-"""Compatibility entry points for Twitch and Steam tracking memberships."""
+"""Tracking composition using canonical rules and current helper callbacks."""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta
 
-from collectors.twitch_newness import parse_timestamp, timestamp
+from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
 from radar_backend.domain import twitch_tracking as rules
 
 TRACKING_DAYS = 30

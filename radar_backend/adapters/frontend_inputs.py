@@ -1,19 +1,7 @@
-"""Load the durable registry from immutable frontend HEAD before collection.
-
-A missing file, failed request or invalid document is a collection failure. It
-must never silently turn an established observation list into an empty list.
-"""
+"""Compose durable inputs from a single immutable frontend revision."""
 
 from __future__ import annotations
 
-# Support both the historical module command and an absolute script path.
-if __package__ in {None, ""}:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-import argparse
 import json
 import re
 import subprocess
@@ -81,30 +69,3 @@ def load_published_inputs() -> dict:
         mapping_path=MAPPING_PATH,
         discovery_path=DISCOVERY_PATH,
     )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Download consistent Twitch tracking and Steam collection inputs"
-    )
-    parser.add_argument("--output", default="output/twitch_tracking_input.json")
-    parser.add_argument("--steam-output", default="output/steam_catalog_input.json")
-    parser.add_argument("--mapping-output", default="output/twitch_steam_mapping_input.json")
-    parser.add_argument("--discovery-output", default="output/twitch_steam_discovery_input.json")
-    args = parser.parse_args()
-    bundle = load_published_inputs()
-    write_json(bundle["tracking_state"], args.output)
-    write_json(bundle["steam_catalog"], args.steam_output)
-    write_json(bundle["steam_mapping_state"], args.mapping_output)
-    write_json(bundle["steam_discovery_state"], args.discovery_output)
-    print(
-        f"Loaded frontend {bundle['source_commit']}: "
-        f"{len(bundle['tracking_state']['games'])} tracking entries, "
-        f"{len(bundle['steam_catalog']['games'])} Steam games and "
-        f"{len(bundle['steam_mapping_state']['games'])} mappings and "
-        f"{len(bundle['steam_discovery_state']['games'])} Steam intake discoveries"
-    )
-
-
-if __name__ == "__main__":
-    main()

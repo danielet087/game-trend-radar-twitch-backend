@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import argparse
-from collectors.twitch_candidates import REGISTRY_PATH
-from collectors.twitch_newness import RELEASE_DATES_PATH
-from collectors.twitch_audience import CACHE_PATH
+from radar_backend.adapters.twitch_candidates import REGISTRY_PATH
+from radar_backend.adapters.twitch_newness import RELEASE_DATES_PATH
+from radar_backend.adapters.twitch_audience import CACHE_PATH
 from radar_backend.domain.time import validate_slot
 
 

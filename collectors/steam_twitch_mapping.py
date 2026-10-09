@@ -16,8 +16,8 @@ from zoneinfo import ZoneInfo
 import requests
 from urllib3.util import Timeout
 
-from collectors.twitch_live import CollectionDeadlineExceeded
-from collectors.twitch_newness import parse_timestamp, timestamp
+from radar_backend.domain.twitch import CollectionDeadlineExceeded
+from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
 from collectors.twitch_steam_admission import (
     TW_STORE_DATE_AUTHORITY, has_taiwan_store_date_authority, is_twitch_qualified,
 )
@@ -223,7 +223,7 @@ def _reuse_discovery_mappings(state: dict, catalog: list[dict], discovery_state:
         return set()
     # Local imports avoid the discovery module's shared mapping-helper import.
     from collectors.twitch_steam_discovery import NON_GAME_IDS, _qualified_members, normalize_discovery_state
-    from collectors.twitch_tracking import normalize_tracking_state
+    from radar_backend.adapters.twitch_tracking import normalize_tracking_state
 
     discovery = normalize_discovery_state(discovery_state)
     tracking = normalize_tracking_state(tracking_state, clock, non_game_ids=NON_GAME_IDS)
