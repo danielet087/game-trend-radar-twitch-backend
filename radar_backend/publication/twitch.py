@@ -10,7 +10,7 @@ from radar_core.publication import (
     PublicationReceipt, SubprocessGitRepository, publish_with_retry, snapshot_revision,
 )
 from radar_backend.state.json_snapshot import write_json
-from scripts.store_twitch_snapshot import (
+from radar_backend.adapters.twitch_snapshot import (
     DISCOVERY_PATH, MAPPING_PATH, STATUS_PATH, TRACKING_PATH,
     observation_order, parse_timestamp, store_snapshot, timestamp, validate_snapshot,
 )

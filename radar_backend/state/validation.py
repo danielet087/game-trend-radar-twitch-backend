@@ -14,7 +14,7 @@ def validate_persisted_tracking(payload: dict) -> dict:
 
 
 def validate_persisted_mapping(payload: dict) -> dict:
-    from collectors.steam_twitch_mapping import normalize_mapping_state
+    from radar_backend.domain.steam_twitch_mapping import normalize_mapping_state
 
     if not isinstance(payload, dict) or "updated_at" not in payload:
         raise ValueError("Persisted Steam/Twitch mapping must be a dated object")
@@ -29,7 +29,7 @@ def validate_persisted_mapping(payload: dict) -> dict:
 
 
 def validate_persisted_discovery(payload: dict) -> dict:
-    from collectors.twitch_steam_discovery import normalize_discovery_state
+    from radar_backend.domain.twitch_steam_discovery import normalize_discovery_state
 
     if not isinstance(payload, dict) or "updated_at" not in payload:
         raise ValueError("Persisted Twitch/Steam discovery must be a dated object")

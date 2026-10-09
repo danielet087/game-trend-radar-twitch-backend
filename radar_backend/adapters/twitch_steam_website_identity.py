@@ -1,4 +1,4 @@
-"""Compatibility facade for exact IGDB website to official Steam identity evidence."""
+"""Compose pure website evidence rules, exact IGDB lookups and keyless Steam HTTP."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from urllib3.util import Timeout
 from radar_backend.application import twitch_steam_website_identity as _application
 from radar_backend.domain import twitch_steam_website_identity as _rules
 from radar_backend.adapters import steam_identity_http as _transport
-from collectors.steam_twitch_mapping import _deadline, _id, _now, _pages
+from radar_backend.adapters.steam_twitch_mapping import _deadline, _id, _now, _pages
 from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
 
 METHOD = _rules.METHOD

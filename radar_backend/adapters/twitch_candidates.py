@@ -131,7 +131,7 @@ def release_hints(
 
 
 def _mapping_callbacks():
-    from collectors.steam_twitch_mapping import (
+    from radar_backend.adapters.steam_twitch_mapping import (
         normalize_mapping_state,
         normalize_steam_catalog,
         refresh_mappings,
@@ -141,7 +141,7 @@ def _mapping_callbacks():
 
 
 def _discovery_callback():
-    from collectors.twitch_steam_discovery import refresh_discoveries
+    from radar_backend.adapters.twitch_steam_discovery import refresh_discoveries
 
     return refresh_discoveries
 

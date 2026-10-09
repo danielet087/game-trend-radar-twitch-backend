@@ -12,14 +12,14 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 
-from collectors.steam_twitch_mapping import normalize_steam_catalog, refresh_mappings
+from radar_backend.adapters.steam_twitch_mapping import normalize_steam_catalog, refresh_mappings
 from radar_backend.domain.twitch_candidates import NON_GAME_IDS
 from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
 from radar_backend.adapters.twitch_tracking import normalize_tracking_state, reconcile_steam_catalog, tracking_metadata
 from radar_backend.state.validation import (
     validate_persisted_discovery, validate_persisted_mapping, validate_persisted_tracking,
 )
-from scripts.store_twitch_snapshot import validate_snapshot
+from radar_backend.adapters.twitch_snapshot import validate_snapshot
 
 ROW_LISTS = ("candidate_games", "tracked_games", "top_games", "excluded_games")
 ROW_METADATA = {"steam_matches", "tracking"}
