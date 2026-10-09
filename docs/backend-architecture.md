@@ -97,11 +97,17 @@ Snapshot 在原讀檔及完整驗證順序後保存真實小時 history、latest
 
 本批接在 Twitch 第十四批 PR #4。既有 workflows、排程、Secrets、Core immutable revision、requirements 與 data 保持；離線測試涵蓋原／新 API、正式 collection → identity → snapshot、無 API 的 metadata refresh、阻擋舊 owners 的完整 import graph、canonical CLI、獨立原 source 語意 oracle、精確檔案 checkout 與實際 bare Git 發布。
 
-## 仍待拆分
+## 完成界線與保留入口
 
-- Twitch 正式收集、來源身分、固定輸入與快照保存已分層；下一批處理 Content 共用 metadata／文字規則，再做四個 consumer 總驗收。
+- Twitch 正式收集、來源身分、固定輸入與快照保存已分層；Content 共用 metadata／文字規則已於第十六批完成，第十七批已進行四個 consumer 總驗收。
 - 固定 frontend 載入已使用新 application／HTTP／composition；collection guard 的獨立時段檢查保持原入口，發布繼續使用共用 Git adapter。
 - 本批未修改 IGDB console 的獨立發布入口、掃描邏輯或排程；共用 core 更新固定提交依賴，不增加外部 runtime 套件。
+
+## 第十七批：正式 workflow 入口驗收
+
+`collect.yml` 實際呼叫的 `scripts.load_twitch_tracking.load_published_inputs` 原先仍動態匯入 legacy mapping collector；本批僅將該 import 改接 `radar_backend.adapters.steam_twitch_mapping`，其餘來源載入、CLI、公開參數、當下 globals、驗證順序與錯誤範圍保持。新增十七項 fresh-process 回歸，阻擋整個舊 collectors namespace 後，仍以同一 immutable frontend commit 讀取四份真實 local JSON、執行 canonical normalization／validators 並寫出原 CLI outputs。
+
+修後完整 Python suite 為 1,247 項；既有 scheduler 77 項、workerd 2 項與 shell 語法驗證通過。Core 0.2.0 為固定非 editable 安裝，五份 Python source bytes 與 immutable revision `bf1d4bc64b361ec35cd4041d78c5016396d5d785` 相同。正式 workflows 使用完整 checkout；本批未更改 workflows、scheduler、來源資格、API 預算、Secrets 或公開資料。四 consumer 的驗收與先合併 Core、前端時鐘支援，再依各相依 PR 順序合併的程序記錄於 Steam repository 的 `docs/backend-acceptance.md`。
 
 ## 離線驗證
 
