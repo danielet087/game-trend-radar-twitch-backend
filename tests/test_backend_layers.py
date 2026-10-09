@@ -10,6 +10,7 @@ from radar_backend.application.collect_twitch import collect_observations
 from radar_backend.domain.collection import CollectionInputs, CollectionRequest, TwitchCredentials
 from radar_backend.jobs.twitch import run_collection_job
 from radar_backend.jobs.twitch_cli import build_parser
+from radar_core.publication import snapshot_revision
 
 
 def request(*args):
@@ -65,7 +66,11 @@ def test_manual_application_does_not_add_schedule_or_success_receipt():
     payload = {"coverage": {"collection_complete": True}, "missing_measurement": None}
     result = collect_observations(request(), TwitchCredentials("id", "secret"),
                                   input_store=MemoryInputs(), collector=lambda **kwargs: payload)
-    assert result == {"coverage": {"collection_complete": True}, "missing_measurement": None}
+    assert result == {"coverage": {"collection_complete": True}, "missing_measurement": None,
+                      "input_revision": snapshot_revision({
+                          "tracking_state": None, "steam_catalog": None,
+                          "steam_mapping_state": None, "steam_discovery_state": None,
+                      })}
     assert "collection_schedule" not in result
     assert "job_result" not in result
 

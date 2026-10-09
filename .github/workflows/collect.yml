@@ -129,6 +129,14 @@ jobs:
         run: |
           bash scripts/publish_frontend.sh output/twitch_live.json
           echo '### Twitch: 已發布最新候選與每小時歷史紀錄。' >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve acknowledged publication revision
+        if: always() && steps.guard.outputs.should_collect == 'true' && hashFiles('output/twitch_publication.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: twitch-publication-receipt
+          path: output/twitch_publication.json
+          if-no-files-found: error
+          retention-days: 2
       - name: Report failure
         if: failure()
         run: |
