@@ -2,7 +2,7 @@ name: Test standalone collector
 on:
   push:
     branches: [main]
-    paths: ['collectors/**', 'scripts/**', 'tests/**', 'scheduler/**', 'data/twitch_*.json', 'requirements*.txt', '.github/workflows/**']
+    paths: ['radar_backend/**', 'collectors/**', 'scripts/**', 'tests/**', 'scheduler/**', 'data/twitch_*.json', 'requirements*.txt', '.github/workflows/**']
   pull_request:
   workflow_dispatch:
 permissions:

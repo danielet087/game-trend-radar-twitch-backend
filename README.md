@@ -1,5 +1,7 @@
 # Game Trend Radar — Twitch 獨立後端
 
+收集入口已依 domain、application、adapters、state 與 jobs 分層；實作映射、相容入口與後續工作見[後端架構](docs/backend-architecture.md)。
+
 保留總觀眾數達 **7,000 人**且有新作線索的 Twitch 遊戲，同時加入既有 Steam 公開清單中**已上市未滿 30 天**、能確認對應 Twitch 類別的遊戲。Steam 近期上市入口不套用 7,000 人門檻；沒有 Steam 商品的主機、手機等 Twitch 新作仍獨立觀測。每小時依 Twitch 類別 ID 收集，重疊來源只查一次，圖片沿用 Twitch 封面。紀錄總觀眾數、開台實況主人數及**每台觀眾數的中位數**，並獨立管理 Twitch「全新」標記的驗證狀態。顯示用的**篩選中位數**只納入免費追隨者 **> 1,000**、且當次觀眾 **≥ 10** 的直播台。
 
 ## 執行狀態

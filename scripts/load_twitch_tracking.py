@@ -5,6 +5,12 @@ must never silently turn an established observation list into an empty list.
 """
 from __future__ import annotations
 
+# Support both the historical module command and an absolute script path.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import re
@@ -14,7 +20,9 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from collectors.twitch_live import write_json
-from collectors.twitch_tracking import normalize_tracking_state
+from radar_backend.state.validation import (
+    validate_persisted_discovery, validate_persisted_mapping, validate_persisted_tracking,
+)
 from scripts.collection_guard import FRONTEND
 from scripts.collection_guard import parse_time
 
@@ -22,45 +30,6 @@ TRACKING_PATH = "data/twitch_tracking.json"
 STEAM_PATH = "data/steam_upcoming.json"
 MAPPING_PATH = "data/twitch_steam_mapping.json"
 DISCOVERY_PATH = "data/twitch_steam_discovery.json"
-
-
-def validate_persisted_tracking(payload: dict) -> dict:
-    # None is useful for an isolated collector's first run, never a valid
-    # downloaded document. The persisted clock is needed for race-safe merges.
-    if not isinstance(payload, dict):
-        raise ValueError("Persisted tracking state must be an object")
-    parse_time(payload.get("updated_at"))
-    return normalize_tracking_state(payload)
-
-
-def validate_persisted_mapping(payload: dict) -> dict:
-    from collectors.steam_twitch_mapping import normalize_mapping_state
-
-    if not isinstance(payload, dict) or "updated_at" not in payload:
-        raise ValueError("Persisted Steam/Twitch mapping must be a dated object")
-    state = normalize_mapping_state(payload)
-    if state["games"]:
-        parse_time(state.get("updated_at"))
-        for entry in state["games"].values():
-            if entry.get("status") != "pending" or entry.get("checked_at") is not None:
-                parse_time(entry.get("checked_at"))
-    return state
-
-
-def validate_persisted_discovery(payload: dict) -> dict:
-    from collectors.twitch_steam_discovery import normalize_discovery_state
-
-    if not isinstance(payload, dict) or "updated_at" not in payload:
-        raise ValueError("Persisted Twitch/Steam discovery must be a dated object")
-    state = normalize_discovery_state(payload)
-    if state["games"]:
-        parse_time(state.get("updated_at"))
-        for entry in state["games"].values():
-            parse_time(entry.get("first_seen_at"))
-            parse_time(entry.get("updated_at"))
-            if entry.get("checked_at") is not None:
-                parse_time(entry["checked_at"])
-    return state
 
 
 def frontend_head() -> str:

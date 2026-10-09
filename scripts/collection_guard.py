@@ -5,6 +5,12 @@ git HEAD so a cached branch URL cannot cause a second full collection.
 """
 from __future__ import annotations
 
+# Support both the historical module command and an absolute script path.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from datetime import datetime, timezone
 import json
 import os
@@ -13,26 +19,9 @@ import subprocess
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from radar_backend.domain.time import hour_slot, parse_time, validate_slot
+
 FRONTEND = "danielet087/game-trend-radar"
-
-
-def parse_time(value: str) -> datetime:
-    if not isinstance(value, str):
-        raise ValueError("Timestamp must be a string")
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("Timestamp must include a timezone")
-    return parsed.astimezone(timezone.utc)
-
-
-def hour_slot(value: datetime) -> str:
-    return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def validate_slot(value: str) -> str:
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:00:00Z", value) or hour_slot(parse_time(value)) != value:
-        raise ValueError("target_slot must be a UTC hour, for example 2026-09-30T00:00:00Z")
-    return value
 
 
 def published_slot(payload: dict | None, *, receipt: bool, now: datetime) -> str | None:
