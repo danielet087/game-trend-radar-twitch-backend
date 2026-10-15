@@ -229,6 +229,9 @@ def refresh_mappings(
             "generated_at": catalog["generated_at"],
             "count": catalog["count"],
         }
+        database_proof = catalog.get("_source_snapshot")
+        if isinstance(database_proof, dict):
+            state["source_catalog"]["database_snapshot"] = deepcopy(database_proof)
         commit = catalog.get("source_commit") or catalog.get("_source_commit")
         if isinstance(commit, str) and re.fullmatch("[0-9a-f]{40}", commit):
             state["source_catalog"]["commit"] = commit

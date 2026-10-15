@@ -56,6 +56,10 @@ def read_published_json(commit: str, path: str):
 
 
 def load_published_tracking() -> dict:
+    from radar_core.storage import primary
+    if primary.enabled():
+        from radar_backend.adapters.database_inputs import load_tracking
+        return load_tracking()
     return application.load_published_tracking(
         frontend_head=frontend_head,
         read_published_json=read_published_json,
@@ -65,6 +69,10 @@ def load_published_tracking() -> dict:
 
 
 def load_published_inputs() -> dict:
+    from radar_core.storage import primary
+    if primary.enabled():
+        from radar_backend.adapters.database_inputs import load_inputs
+        return load_inputs()
     from radar_backend.adapters.steam_twitch_mapping import normalize_steam_catalog
 
     return application.load_published_inputs(
@@ -98,7 +106,7 @@ def main() -> None:
     write_json(bundle["steam_mapping_state"], args.mapping_output)
     write_json(bundle["steam_discovery_state"], args.discovery_output)
     print(
-        f"Loaded frontend {bundle['source_commit']}: "
+        f"Loaded {'database' if bundle.get('source_snapshot') else 'frontend'} {bundle.get('source_snapshot') or bundle['source_commit']}: "
         f"{len(bundle['tracking_state']['games'])} tracking entries, "
         f"{len(bundle['steam_catalog']['games'])} Steam games and "
         f"{len(bundle['steam_mapping_state']['games'])} mappings and "

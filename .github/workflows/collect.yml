@@ -39,6 +39,7 @@ concurrency:
 
 jobs:
   collect:
+    if: vars.RADAR_DATABASE_MIGRATION_PAUSE != '1'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -48,15 +49,18 @@ jobs:
       - name: Check collection credentials
         id: credentials
         env:
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
           FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
         run: |
-          if [ -n "$TWITCH_CLIENT_ID" ] && [ -n "$TWITCH_CLIENT_SECRET" ] && [ -n "$FRONTEND_REPO_TOKEN" ]; then
+          if [ -n "$TWITCH_CLIENT_ID" ] && [ -n "$TWITCH_CLIENT_SECRET" ] && [ -n "$FRONTEND_REPO_TOKEN" ] && { [ "$RADAR_DATABASE_PRIMARY" != "1" ] || { [ -n "$TURSO_DATABASE_URL" ] && [ -n "$TURSO_AUTH_TOKEN" ]; }; }; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo '::error::Missing collection or publication credentials.'
+            echo '::error::Missing collection, database or publication credentials.'
             echo '### Twitch: 缺少收集或發布 Secrets，本次未收集、未發布。' >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
@@ -77,15 +81,22 @@ jobs:
         id: guard
         if: steps.credentials.outputs.configured == 'true'
         env:
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           TARGET_SLOT: ${{ inputs.target_slot }}
           TRIGGER_SOURCE: ${{ inputs.trigger_source || 'manual' }}
           FORCE_COLLECTION: ${{ inputs.force || github.event_name == 'push' || false }}
         run: python -m scripts.collection_guard
       - name: Load consistent observation list and Steam mapping/intake inputs
         if: steps.guard.outputs.should_collect == 'true'
+        env:
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: python -m scripts.load_twitch_tracking --output output/twitch_tracking_input.json --steam-output output/steam_catalog_input.json --mapping-output output/twitch_steam_mapping_input.json --discovery-output output/twitch_steam_discovery_input.json
-      - name: Restore daily follower counts
-        if: steps.guard.outputs.should_collect == 'true'
+      - name: Restore legacy daily follower counts
+        if: steps.guard.outputs.should_collect == 'true' && vars.RADAR_DATABASE_PRIMARY != '1'
         continue-on-error: true
         uses: actions/cache/restore@v4
         with:
@@ -96,6 +107,9 @@ jobs:
       - name: Collect Twitch
         if: steps.guard.outputs.should_collect == 'true'
         env:
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
           TARGET_SLOT: ${{ steps.guard.outputs.target_slot }}
@@ -103,8 +117,8 @@ jobs:
         # One 25-minute collection deadline, leaving time inside the 30-minute
         # job for setup, cache save and publication. No separate follower cap.
         run: python -m scripts.update_twitch --min-viewers 7000 --max-collection-seconds 1500 --target-slot "$TARGET_SLOT" --trigger-source "$TRIGGER_SOURCE" --tracking-state output/twitch_tracking_input.json --steam-catalog output/steam_catalog_input.json --steam-mapping output/twitch_steam_mapping_input.json --steam-discovery output/twitch_steam_discovery_input.json --output output/twitch_live.json
-      - name: Save follower lookup progress
-        if: always() && steps.guard.outputs.should_collect == 'true' && hashFiles('.cache/twitch_followers.json') != ''
+      - name: Save legacy follower lookup progress
+        if: always() && steps.guard.outputs.should_collect == 'true' && vars.RADAR_DATABASE_PRIMARY != '1' && hashFiles('.cache/twitch_followers.json') != ''
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
@@ -125,6 +139,9 @@ jobs:
       - name: Publish to frontend
         if: steps.guard.outputs.should_collect == 'true'
         env:
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
         run: |
           bash scripts/publish_frontend.sh output/twitch_live.json

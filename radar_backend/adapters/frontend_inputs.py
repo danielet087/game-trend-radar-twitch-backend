@@ -44,6 +44,10 @@ def read_published_json(commit: str, path: str):
 
 
 def load_published_tracking() -> dict:
+    from radar_core.storage import primary
+    if primary.enabled():
+        from radar_backend.adapters.database_inputs import load_tracking
+        return load_tracking()
     return application.load_published_tracking(
         frontend_head=frontend_head,
         read_published_json=read_published_json,
@@ -53,6 +57,10 @@ def load_published_tracking() -> dict:
 
 
 def load_published_inputs() -> dict:
+    from radar_core.storage import primary
+    if primary.enabled():
+        from radar_backend.adapters.database_inputs import load_inputs
+        return load_inputs()
     from radar_backend.adapters.steam_twitch_mapping import normalize_steam_catalog
 
     return application.load_published_inputs(

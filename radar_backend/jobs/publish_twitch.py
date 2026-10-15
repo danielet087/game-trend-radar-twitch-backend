@@ -10,6 +10,7 @@ from typing import Mapping
 
 from radar_core.jobs import JobResult, JobStatus
 from radar_core.publication import PublicationError, SubprocessGitRepository
+from radar_core.storage.sql import StorageError
 from radar_backend.publication.twitch import freeze_snapshot, input_kind, publish_snapshot
 from radar_backend.state.json_snapshot import write_json
 
@@ -76,7 +77,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         run_publication_job(args.snapshot, os.environ, receipt_output=args.receipt_output)
-    except (ValueError, OSError, subprocess.SubprocessError, PublicationError) as error:
+    except (ValueError, OSError, subprocess.SubprocessError, PublicationError, StorageError) as error:
         raise SystemExit(f"Twitch publication failed ({type(error).__name__}); collected JSON remains unchanged.") from None
 
 

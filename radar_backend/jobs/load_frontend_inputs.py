@@ -23,7 +23,7 @@ def main() -> None:
     write_json(bundle["steam_mapping_state"], args.mapping_output)
     write_json(bundle["steam_discovery_state"], args.discovery_output)
     print(
-        f"Loaded frontend {bundle['source_commit']}: "
+        f"Loaded {'database' if bundle.get('source_snapshot') else 'frontend'} {bundle.get('source_snapshot') or bundle['source_commit']}: "
         f"{len(bundle['tracking_state']['games'])} tracking entries, "
         f"{len(bundle['steam_catalog']['games'])} Steam games and "
         f"{len(bundle['steam_mapping_state']['games'])} mappings and "
