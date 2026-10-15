@@ -198,11 +198,11 @@ def normalize_steam_catalog(
         display = row.get("display_name") or name
         english = row.get("name_en") or name
         followers = row.get("followers")
+        unknown_followers = followers is None and is_twitch_qualified(row)
         if (
             not isinstance(display, str)
             or not isinstance(english, str)
-            or type(followers) is not int
-            or (followers < 0)
+            or not (type(followers) is int and followers >= 0 or unknown_followers)
         ):
             raise ValueError("Invalid Steam catalog display metadata")
         tags, genres = (_strings(row.get("tags")), _strings(row.get("genres")))
@@ -215,6 +215,17 @@ def normalize_steam_catalog(
                 "name_en": english.strip(),
                 "store_url": f"https://store.steampowered.com/app/{appid}/",
                 "followers": followers,
+                **(
+                    {
+                        key: deepcopy(row[key])
+                        for key in (
+                            "follower_checked_at", "follower_source", "official_ge5000",
+                            "follower_status", "follower_unavailable_at", "twitch_admission",
+                        )
+                    }
+                    if unknown_followers
+                    else {}
+                ),
                 "release_at": timestamp(release),
                 "release_date": start,
                 "release_date_timezone": "Asia/Taipei",
