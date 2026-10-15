@@ -251,7 +251,7 @@ export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetc
   return { ...base, action: "dispatch", reason: "missing_published_collection", attempts: attemptCount + 1 };
 }
 
-// New jobs are opt-in through RADAR_ENABLED_JOBS; production enables all six.
+// New jobs are opt-in through RADAR_ENABLED_JOBS; production enables all seven.
 // An absent or empty list retains the Twitch-only monitor for rollback.
 // Destinations cannot be configured by callers or redirected by an API response.
 export const SCHEDULE_JOBS = Object.freeze([
@@ -270,6 +270,10 @@ export const SCHEDULE_JOBS = Object.freeze([
       "steam-official-nearfirst-batch-once.yml", "steam-official-hour-stress-once.yml"] },
   { id: "steam_content", repo: "game-trend-radar-content-backend", workflow: "steam-catalog-reconcile.yml", enabled: false,
     minute: 30, taipeiHours: [7, 19] },
+  // Official description deadlines and retry cooldowns are independent of catalog
+  // completion. Every slot must run even after an earlier success that day.
+  { id: "steam_descriptions", repo: "game-trend-radar-content-backend", workflow: "steam-description-refresh.yml", enabled: false,
+    minute: 30, taipeiHours: [1, 7, 13, 19] },
   // Keep credential use in the existing Twitch runner; Nintendo code and data
   // remain in their own repository. This reuses the existing 30-minute tick.
   { id: "nintendo_daily", repo: "game-trend-radar-twitch-backend", workflow: "collect-nintendo.yml", enabled: false,

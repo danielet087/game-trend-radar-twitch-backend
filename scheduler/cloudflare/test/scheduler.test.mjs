@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import worker, { checkScheduledJobs, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS } from "../src/worker.mjs";
 
 const ENV = { GITHUB_ACTIONS_TOKEN: "offline-fixture-only",
-  RADAR_ENABLED_JOBS: "steam_daily,steam_catchup,steam_growth,steam_content,frontend_insights,nintendo_daily" };
+  RADAR_ENABLED_JOBS: "steam_daily,steam_catchup,steam_growth,steam_content,steam_descriptions,frontend_insights,nintendo_daily" };
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
 const epoch = (value) => Date.parse(value);
 const iso = (value) => new Date(epoch(value)).toISOString().replace(".000Z", "Z");
@@ -67,11 +67,12 @@ test("Taiwan midnight, year boundaries and daily times produce exact UTC minute 
     ["2026-10-03T01:15:00+08:00", "steam_growth", "2026-10-02T17:15:00Z"],
     ["2026-10-03T07:30:00+08:00", "steam_content", "2026-10-02T23:30:00Z"],
     ["2026-10-03T19:30:00+08:00", "steam_content", "2026-10-03T11:30:00Z"],
+    ["2027-01-01T01:30:00+08:00", "steam_descriptions", "2026-12-31T17:30:00Z"],
     ["2026-10-03T08:30:00+08:00", "nintendo_daily", "2026-10-03T00:30:00Z"],
     ["2027-01-01T08:30:00+08:00", "nintendo_daily", "2027-01-01T00:30:00Z"],
     ["2026-10-03T12:17:00+08:00", "frontend_insights", "2026-10-03T04:17:00Z"],
     ["2026-10-03T12:05:00+08:00", "twitch", "2026-10-03T04:00:00Z"],
-  ]) assert.deepEqual(scheduledJobs(when), [{ job_id: id, target_slot: slot }]);
+  ]) assert.deepEqual(scheduledJobs(when).filter((item) => item.job_id === id), [{ job_id: id, target_slot: slot }]);
   assert.throws(() => scheduledJobs("invalid"), /invalid_clock/);
 });
 
@@ -98,6 +99,77 @@ test("Nintendo is due once a day at Taiwan 08:30 without altering the other 30-m
     assert.ok(!scheduledJobs(`2026-10-03T08:${String(minute).padStart(2, "0")}:00+08:00`)
       .some((item) => item.job_id === "nintendo_daily"));
   }
+});
+
+test("description refresh runs every six hours on the existing 30-minute tick", () => {
+  for (let hour = 0; hour < 24; hour += 1) {
+    const when = `2026-10-03T${String(hour).padStart(2, "0")}:30:00+08:00`;
+    const due = scheduledJobs(when);
+    assert.equal(due.some((item) => item.job_id === "steam_descriptions"), [1, 7, 13, 19].includes(hour));
+    if ([7, 19].includes(hour)) {
+      assert.deepEqual(due.map((item) => item.job_id), ["steam_content", "steam_descriptions"]);
+    }
+  }
+  for (const minute of [0, 5, 15, 17, 29, 31]) {
+    assert.ok(!scheduledJobs(`2026-10-03T01:${String(minute).padStart(2, "0")}:00+08:00`)
+      .some((item) => item.job_id === "steam_descriptions"));
+  }
+});
+
+test("description refresh stays opt-in and needs the existing scheduler token", async () => {
+  const staged = fixture();
+  const [result] = await check(staged, "2026-10-04T01:30:00+08:00", {
+    ...ENV, RADAR_ENABLED_JOBS: "steam_content",
+  });
+  assert.equal(result.job_id, "steam_descriptions");
+  assert.equal(result.reason, "job_staged");
+  assert.equal(staged.requests.length, 0);
+  const missingToken = fixture();
+  const [blocked] = await check(missingToken, "2026-10-04T01:30:00+08:00", {
+    RADAR_ENABLED_JOBS: "steam_descriptions",
+  });
+  assert.equal(blocked.action, "blocked");
+  assert.equal(blocked.reason, "invalid_configuration");
+  assert.equal(missingToken.requests.length, 0);
+});
+
+test("an earlier description success never suppresses the next slot that day", async () => {
+  const when = "2026-10-22T07:30:00+08:00";
+  const api = fixture({ runs: [run(iso("2026-10-22T01:30:00+08:00"))] });
+  const results = await check(api, when, onlyJob("steam_descriptions"));
+  const result = results.find((item) => item.job_id === "steam_descriptions");
+  assert.equal(result.action, "dispatch");
+  assert.equal(result.target_slot, iso(when));
+  assert.equal(api.posts().length, 1);
+  assert.ok(api.posts()[0].url.pathname.endsWith("/steam-description-refresh.yml/dispatches"));
+});
+
+test("catalog and description refresh dispatch independently at their shared minute", async () => {
+  const when = "2026-10-23T07:30:00+08:00";
+  const api = fixture({ activeWorkflows: {
+    "steam-catalog-reconcile.yml": { in_progress: [run(iso(when), { status: "in_progress" })] },
+  } });
+  const results = await check(api, when);
+  assert.equal(results.find((item) => item.job_id === "steam_content").reason, "workflow_active");
+  assert.equal(results.find((item) => item.job_id === "steam_descriptions").action, "dispatch");
+  assert.equal(api.posts().length, 1);
+  assert.ok(api.posts()[0].url.pathname.endsWith("/steam-description-refresh.yml/dispatches"));
+});
+
+test("description refresh consumes each attempted slot and waits for its own active workflow", async () => {
+  for (const conclusion of ["success", "failure", "cancelled"]) {
+    const when = "2026-10-24T13:30:00+08:00";
+    const api = fixture({ runs: [run(iso(when), { conclusion })] });
+    const [result] = await check(api, when, onlyJob("steam_descriptions"));
+    assert.equal(result.reason, conclusion === "success" ? "slot_completed" : "slot_already_attempted");
+    assert.equal(api.posts().length, 0);
+  }
+  const busy = fixture({ activeWorkflows: {
+    "steam-description-refresh.yml": { waiting: [run(iso("2026-10-25T01:30:00+08:00"), { status: "waiting" })] },
+  } });
+  const [result] = await check(busy, "2026-10-25T13:30:00+08:00", onlyJob("steam_descriptions"));
+  assert.equal(result.reason, "workflow_active");
+  assert.equal(busy.posts().length, 0);
 });
 
 test("Nintendo remains staged when the enable list has only the existing jobs", async () => {
@@ -168,11 +240,12 @@ test("each enabled job sends only its fixed destination and exact due slot input
     ["2026-10-05T03:00:00+08:00", "steam_catchup"],
     ["2026-10-05T01:15:00+08:00", "steam_growth"],
     ["2026-10-05T07:30:00+08:00", "steam_content"],
+    ["2026-10-05T01:30:00+08:00", "steam_descriptions"],
     ["2026-10-05T08:30:00+08:00", "nintendo_daily"],
     ["2026-10-05T12:17:00+08:00", "frontend_insights"],
   ]) {
     const api = fixture();
-    assert.equal((await check(api, when))[0].action, "dispatch");
+    assert.equal((await check(api, when, onlyJob(id))).find((item) => item.job_id === id).action, "dispatch");
     const job = SCHEDULE_JOBS.find((item) => item.id === id);
     assert.equal(api.posts().length, 1);
     assert.equal(api.posts()[0].url.pathname, `/repos/danielet087/${job.repo}/actions/workflows/${job.workflow}/dispatches`);
