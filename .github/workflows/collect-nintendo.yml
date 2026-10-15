@@ -35,6 +35,7 @@ concurrency:
 
 jobs:
   collect:
+    if: vars.RADAR_DATABASE_MIGRATION_PAUSE != '1'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -49,11 +50,14 @@ jobs:
           persist-credentials: false
       - name: Check collection credentials
         env:
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
           FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
         run: |
-          if [ -z "$TWITCH_CLIENT_ID" ] || [ -z "$TWITCH_CLIENT_SECRET" ] || [ -z "$FRONTEND_REPO_TOKEN" ]; then
+          if [ -z "$TWITCH_CLIENT_ID" ] || [ -z "$TWITCH_CLIENT_SECRET" ] || [ -z "$FRONTEND_REPO_TOKEN" ] || { [ "$RADAR_DATABASE_PRIMARY" = "1" ] && { [ -z "$TURSO_DATABASE_URL" ] || [ -z "$TURSO_AUTH_TOKEN" ]; }; }; then
             echo '::error::Missing IGDB collection or publication credentials.'
             exit 1
           fi
@@ -69,6 +73,9 @@ jobs:
       - name: Recheck daily publication while holding concurrency
         id: guard
         env:
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           TARGET_SLOT: ${{ inputs.target_slot }}
           TRIGGER_SOURCE: ${{ inputs.trigger_source || 'manual' }}
           FORCE_COLLECTION: ${{ inputs.force || github.event_name == 'push' || false }}
@@ -80,35 +87,11 @@ jobs:
       - name: Load persistent IGDB console candidates
         if: steps.guard.outputs.should_collect == 'true'
         env:
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
-        run: |
-          python - <<'PY'
-          import hashlib, json, os
-          from pathlib import Path
-          import requests
-          from scripts.publish import GitHub, FRONTEND, PublishError
-          client = GitHub(os.environ['FRONTEND_REPO_TOKEN'])
-          head, _ = client.head(FRONTEND)
-          try:
-              metadata = client.request('GET', f'/repos/{FRONTEND}/contents/data/nintendo_master.json?ref={head}')
-          except PublishError as error:
-              if error.status != 404:
-                  raise SystemExit('Cannot inspect previous Nintendo state; the existing state was preserved.')
-              print('Verified that this commit has no Nintendo master; starting the first collection.')
-          else:
-              response = requests.get(f'https://raw.githubusercontent.com/{FRONTEND}/{head}/data/nintendo_master.json', timeout=30, allow_redirects=False)
-              if response.status_code != 200:
-                  raise SystemExit(f'Cannot read previous Nintendo state: HTTP {response.status_code}')
-              raw = response.content
-              blob_sha = hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest()
-              if blob_sha != metadata.get('sha'):
-                  raise SystemExit('Previous Nintendo master does not match the pinned Git commit.')
-              document = json.loads(raw.decode('utf-8'))
-              if not isinstance(document, dict):
-                  raise SystemExit('Invalid Nintendo candidate document; previous state was not discarded.')
-              Path('input').mkdir(exist_ok=True)
-              Path('input/nintendo_master.json').write_bytes(raw)
-          PY
+        run: python -m scripts.load_state --output input/nintendo_master.json
       - name: Collect and qualify the next 365 days
         if: steps.guard.outputs.should_collect == 'true'
         env:
@@ -124,6 +107,9 @@ jobs:
       - name: Publish IGDB console data and receipt
         if: steps.guard.outputs.should_collect == 'true'
         env:
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
           TARGET_SLOT: ${{ steps.guard.outputs.target_slot }}
           TRIGGER_SOURCE: ${{ inputs.trigger_source || 'manual' }}

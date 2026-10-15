@@ -72,6 +72,10 @@ def decide(*, now: datetime, requested_slot: str = "", source: str = "manual",
 
 
 def load_published() -> tuple[dict | None, dict | None]:
+    from radar_core.storage import primary
+    if primary.enabled():
+        # DB commit, independent of projection lag, is the duplicate-work guard.
+        return primary.read_json(FRONTEND + "@main", "data/twitch_collection_status.json"), None
     remote = subprocess.run(
         ["git", "ls-remote", f"https://github.com/{FRONTEND}.git", "refs/heads/main"],
         check=True, capture_output=True, text=True, timeout=30,
