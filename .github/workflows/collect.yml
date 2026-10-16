@@ -5,11 +5,12 @@ run-name: "Collect Twitch | slot=${{ inputs.target_slot || 'automatic' }} | ${{ 
 # Delayed starts keep actual measurement times.
 # CI tests run separately and do not call the live API.
 on:
-  # Bootstrap a mapping-module deployment once using the regular collection
+  # Verify shared-core or mapping deployments once using the regular collection
   # pipeline; data-only commits never trigger this path.
   push:
     branches: [main]
     paths:
+      - 'requirements-core.txt'
       - 'collectors/steam_twitch_mapping.py'
       - 'collectors/twitch_steam_discovery.py'
   workflow_dispatch:
