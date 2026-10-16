@@ -114,8 +114,8 @@ jobs:
           TARGET_SLOT: ${{ steps.guard.outputs.target_slot }}
           TRIGGER_SOURCE: ${{ inputs.trigger_source || 'manual' }}
         run: python -m scripts.publish --output-dir output --target-slot "$TARGET_SLOT" --trigger-source "$TRIGGER_SOURCE"
-      - name: Preserve the collected public data
-        if: always() && steps.guard.outputs.should_collect == 'true' && hashFiles('nintendo/output/nintendo_upcoming.json') != ''
+      - name: Preserve collected data or failure diagnostics
+        if: always() && steps.guard.outputs.should_collect == 'true' && hashFiles('nintendo/output/*.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: nintendo-catalog-${{ github.run_attempt }}
