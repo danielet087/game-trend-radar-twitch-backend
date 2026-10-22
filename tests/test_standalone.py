@@ -81,7 +81,7 @@ os.execv(real,[real,*sys.argv[1:]])
     assert json.loads(git('--git-dir',remote,'show',f'main:data/{PLATFORM}_live.json'))['top_games'] == []
     changed = set(git('--git-dir',remote,'diff-tree','--no-commit-id','--name-only','-r','main').splitlines())
     assert changed == {'data/twitch_live.json', 'data/twitch_history/2026-09-29.json', 'data/twitch_tracking.json',
-                       'data/twitch_steam_mapping.json', 'data/twitch_steam_discovery.json'}
+                       'data/twitch_steam_mapping.json', 'data/twitch_steam_discovery.json', 'data/twitch_series/index.json'}
     history = json.loads(git('--git-dir',remote,'show','main:data/twitch_history/2026-09-29.json'))
     assert len(history['hours']) == 1
     saved_registry = json.loads(git('--git-dir',remote,'show','main:data/twitch_tracking.json'))

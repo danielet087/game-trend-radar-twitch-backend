@@ -72,6 +72,7 @@ def test_one_acknowledged_commit_contains_census_history_state_and_bound_receipt
         "data/twitch_live.json", "data/twitch_history/2026-09-29.json",
         "data/twitch_collection_status.json", "data/twitch_tracking.json",
         "data/twitch_steam_mapping.json", "data/twitch_steam_discovery.json",
+        "data/twitch_series/index.json", "data/twitch_series/1/2026-09.json",
     }
     status = read_remote(remote, "data/twitch_collection_status.json")
     assert status["collection_complete"] is True
