@@ -13,6 +13,8 @@ from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
+from radar_backend.domain.twitch_archive import qualified_archive_sources
+
 TAIPEI = timezone(timedelta(hours=8))
 SERIES_PATH = "data/twitch_series/"
 
@@ -81,6 +83,8 @@ def _archive_metadata(frontend, root, index):
                     sample_count=len(samples), viewer_sample_count=len(viewers),
                     peak_viewer_count=max(viewers, default=None))
         entry = tracked.get(game_id)
+        game["archive_eligible"] = True
+        game["admission_sources"] = qualified_archive_sources(game_id, entry)
         game["box_art_url"] = cover_url((entry or {}).get("box_art_url")) or covers.get(game_id) or cover_url(game.get("box_art_url"))
         if not entry:
             status = "untracked" if registry is not None else "unknown"
@@ -107,7 +111,8 @@ def _archive_metadata(frontend, root, index):
         game["aliases"] = sorted({name.strip() for name in names if isinstance(name, str) and name.strip()})
         game["display_name"] = next((item["display_name"] for item in steam if isinstance(item.get("display_name"), str) and item["display_name"].strip()), game["name"])
         game["steam_appids"] = sorted({str(item["steam_appid"]) for item in steam if re.fullmatch(r"[1-9]\d*", str(item.get("steam_appid", "")))})
-    index["archive_version"] = 1
+    index["archive_version"] = 2
+    index["archive_scope"] = "qualified_tracking_admissions"
 
 
 def project_series(frontend: Path, day_path: str | None = None) -> None:
@@ -123,6 +128,15 @@ idempotent, including a category removed from a replacement census.
     }
     if index.get("schema_version") != 1 or index.get("timezone") != "Asia/Taipei":
         raise ValueError("Unsupported Twitch series index")
+    tracking_path = frontend / "data/twitch_tracking.json"
+    if not tracking_path.exists() and index["games"]:
+        raise ValueError("Tracking registry is required to curate existing Twitch history")
+    registry = json.loads(tracking_path.read_text()) if tracking_path.exists() else {"schema_version": 1, "games": {}}
+    if registry.get("schema_version") != 1 or not isinstance(registry.get("games"), dict):
+        raise ValueError("Unsupported Twitch tracking registry")
+    admitted = {game_id for game_id, entry in registry["games"].items() if qualified_archive_sources(game_id, entry)}
+    # Old raw samples remain auditable, but cannot create an archive membership.
+    index["games"] = {game_id: game for game_id, game in index["games"].items() if game_id in admitted}
     days = ([frontend / day_path] if day_path and index_path.exists() else
             sorted((frontend / "data/twitch_history").glob("????-??-??.json")))
     updates = defaultdict(dict)
@@ -148,7 +162,7 @@ idempotent, including a category removed from a replacement census.
             rows = {}
             for game in sample["games"]:
                 game_id = str(game.get("game_id", ""))
-                if (not re.fullmatch(r"[1-9]\d{0,15}", game_id)
+                if (game_id not in admitted
                         or game.get("observation_status") in {"retained", "stale"}
                         or game.get("observation_freshness") == "stale"):
                     continue

@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['radar_backend/state/twitch_series.py', '.github/workflows/project-twitch-series.yml']
+    paths: ['radar_backend/state/twitch_series.py', 'radar_backend/domain/twitch_archive.py', '.github/workflows/project-twitch-series.yml']
 permissions:
   contents: read
 concurrency:
