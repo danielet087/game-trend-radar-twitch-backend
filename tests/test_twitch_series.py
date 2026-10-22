@@ -2,8 +2,10 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from radar_backend.state.twitch_series import project_series
+from radar_backend.jobs.project_twitch_series import restore_covers
 
 
 class TwitchSeriesTests(unittest.TestCase):
@@ -71,7 +73,8 @@ class TwitchSeriesTests(unittest.TestCase):
                 (history / f'{date}.json').write_text(json.dumps({'schema_version': 1, 'timezone': 'Asia/Taipei', 'date': date,
                     'hours': {hour: {'generated_at': hour, 'games': [{'game_id': '42', 'game_name': 'Onimusha', 'viewer_count': count}]}}}))
             registry = {'schema_version': 1, 'updated_at': '2026-10-22T00:00:00Z', 'games': {
-                '42': {'status': 'expired', 'steam_matches': [{'steam_appid': '100', 'display_name': '鬼武者', 'name_en': 'Onimusha'}]},
+                '42': {'status': 'expired', 'box_art_url': 'https://static-cdn.jtvnw.net/ttv-boxart/42_IGDB-{width}x{height}.jpg',
+                       'steam_matches': [{'steam_appid': '100', 'display_name': '鬼武者', 'name_en': 'Onimusha'}]},
             }}
             (root / 'data/twitch_tracking.json').write_text(json.dumps(registry))
             project_series(root)
@@ -80,6 +83,7 @@ class TwitchSeriesTests(unittest.TestCase):
             self.assertEqual(game['display_name'], '鬼武者')
             self.assertEqual(game['sample_count'], 2)
             self.assertEqual(game['peak_viewer_count'], 14)
+            self.assertEqual(game['box_art_url'], registry['games']['42']['box_art_url'])
             self.assertIn('Onimusha', game['aliases'])
             # A new independent source can resume tracking without losing history.
             registry['games']['42'].update(status='active', tracking_sources={
@@ -92,6 +96,31 @@ class TwitchSeriesTests(unittest.TestCase):
             self.assertEqual(game['tracking_status'], 'active')
             self.assertEqual(game['sample_count'], 2)
             self.assertEqual(game['first_hour'], '2026-09-30T15:00:00Z')
+            registry['games'].clear()
+            (root / 'data/twitch_tracking.json').write_text(json.dumps(registry))
+            project_series(root)
+            game = json.loads((root / 'data/twitch_series/index.json').read_text())['games']['42']
+            self.assertEqual(game['box_art_url'], 'https://static-cdn.jtvnw.net/ttv-boxart/42_IGDB-{width}x{height}.jpg')
+
+    def test_cover_backfill_only_requests_missing_artwork_and_preserves_metrics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / 'data/twitch_series/index.json'
+            path.parent.mkdir(parents=True)
+            cover = 'https://static-cdn.jtvnw.net/ttv-boxart/42_IGDB-{width}x{height}.jpg'
+            index = {'generated_at': '2026-10-22T00:00:00Z', 'games': {
+                '41': {'box_art_url': cover, 'sample_count': 95}, '42': {'box_art_url': None, 'sample_count': 12}, '43': {'box_art_url': None},
+            }}
+            path.write_text(json.dumps(index))
+            requested = []
+            def lookup(ids):
+                requested.extend(ids)
+                return {'42': SimpleNamespace(box_art_url=cover), '43': SimpleNamespace(box_art_url='https://example.com/cover.jpg')}
+            self.assertEqual(restore_covers(root, lookup), 1)
+            self.assertEqual(requested, ['42', '43'])
+            result = json.loads(path.read_text())
+            index['games']['42']['box_art_url'] = cover
+            self.assertEqual(result, index)
 
 
 if __name__ == '__main__':

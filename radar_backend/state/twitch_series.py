@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
 
 TAIPEI = timezone(timedelta(hours=8))
 SERIES_PATH = "data/twitch_series/"
@@ -33,6 +34,16 @@ def _write(path, value):
         path.write_text(raw, encoding="utf-8")
 
 
+def cover_url(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        url = urlsplit(value)
+        return value if url.scheme == "https" and url.netloc == "static-cdn.jtvnw.net" and url.path.startswith("/ttv-boxart/") else None
+    except ValueError:
+        return None
+
+
 def _archive_metadata(frontend, root, index):
     """Keep archive discovery independent of the latest live candidate list."""
     def optional(name):
@@ -44,8 +55,10 @@ def _archive_metadata(frontend, root, index):
     tracked = (registry or {}).get("games", {})
     forward = (mapping or {}).get("games", {})
     as_of = max(filter(None, [_time(index.get("generated_at")), _time((registry or {}).get("updated_at"))]), default=None)
-    mapped = defaultdict(list)
+    mapped, covers = defaultdict(list), {}
     for appid, entry in forward.items():
+        if entry.get("status") == "matched" and cover_url(entry.get("box_art_url")):
+            covers[str(entry.get("twitch_game_id"))] = entry["box_art_url"]
         if entry.get("status") == "matched" and isinstance(entry.get("steam"), dict):
             mapped[str(entry.get("twitch_game_id"))].append({**entry["steam"], "steam_appid": appid})
 
@@ -68,6 +81,7 @@ def _archive_metadata(frontend, root, index):
                     sample_count=len(samples), viewer_sample_count=len(viewers),
                     peak_viewer_count=max(viewers, default=None))
         entry = tracked.get(game_id)
+        game["box_art_url"] = cover_url((entry or {}).get("box_art_url")) or covers.get(game_id) or cover_url(game.get("box_art_url"))
         if not entry:
             status = "untracked" if registry is not None else "unknown"
         elif entry.get("status") in {"expired", "excluded"}:
@@ -160,7 +174,9 @@ idempotent, including a category removed from a replacement census.
             game = index["games"].setdefault(game_id, {"name": game_id, "months": []})
             game["months"] = sorted(set(game["months"]) | {month})
             if game_id in metadata and metadata[game_id][0] >= game.get("name_at", ""):
-                game["name_at"], game["name"], game["box_art_url"] = metadata[game_id]
+                game["name_at"], game["name"], cover = metadata[game_id]
+                if cover_url(cover):
+                    game["box_art_url"] = cover
     index["generated_at"] = max((at for hours in index["months"].values() for at in hours.values()), default=None)
     _archive_metadata(frontend, root, index)
     _write(index_path, index)
