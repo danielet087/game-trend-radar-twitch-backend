@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import json
+import math
 from pathlib import Path
 import re
 
@@ -30,6 +31,69 @@ def _write(path, value):
     if not path.exists() or path.read_text(encoding="utf-8") != raw:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(raw, encoding="utf-8")
+
+
+def _archive_metadata(frontend, root, index):
+    """Keep archive discovery independent of the latest live candidate list."""
+    def optional(name):
+        path = frontend / "data" / name
+        return json.loads(path.read_text()) if path.exists() else None
+
+    registry = optional("twitch_tracking.json")
+    mapping = optional("twitch_steam_mapping.json")
+    tracked = (registry or {}).get("games", {})
+    forward = (mapping or {}).get("games", {})
+    as_of = max(filter(None, [_time(index.get("generated_at")), _time((registry or {}).get("updated_at"))]), default=None)
+    mapped = defaultdict(list)
+    for appid, entry in forward.items():
+        if entry.get("status") == "matched" and isinstance(entry.get("steam"), dict):
+            mapped[str(entry.get("twitch_game_id"))].append({**entry["steam"], "steam_appid": appid})
+
+    def active(source, steam=False):
+        if source.get("status") != "active" or as_of is None:
+            return False
+        expiry, release = _time(source.get("expires_at")), _time(source.get("release_at"))
+        return (not source.get("expires_at") or expiry is not None and expiry > as_of) and (
+            not steam or release is not None and expiry is not None and release <= as_of)
+
+    for game_id, game in index["games"].items():
+        samples = {}
+        for month in game["months"]:
+            chunk = json.loads((root / game_id / f"{month}.json").read_text())
+            samples.update({hour: row for hour, row in chunk["hours"].items()
+                            if row.get("generated_at") == index["months"].get(month, {}).get(hour)})
+        viewers = [row.get("viewer_count") for row in samples.values()]
+        viewers = [value for value in viewers if type(value) in {int, float} and math.isfinite(value) and value >= 0]
+        game.update(first_hour=min(samples, default=None), last_hour=max(samples, default=None),
+                    sample_count=len(samples), viewer_sample_count=len(viewers),
+                    peak_viewer_count=max(viewers, default=None))
+        entry = tracked.get(game_id)
+        if not entry:
+            status = "untracked" if registry is not None else "unknown"
+        elif entry.get("status") in {"expired", "excluded"}:
+            status = "ended"
+        elif entry.get("status") == "active":
+            sources = entry.get("tracking_sources")
+            is_active = any(active(source, key.startswith("steam:")) for key, source in sources.items()) if isinstance(sources, dict) else active(entry)
+            status = "active" if is_active else "ended"
+        else:
+            status = "unknown"
+        game["tracking_status"] = status
+        game["tracking_reason"] = (entry or {}).get("status_reason")
+        steam = []
+        for item in (entry or {}).get("steam_matches", []):
+            decision = forward.get(str(item.get("steam_appid")))
+            if decision and (decision.get("status") != "matched" or str(decision.get("twitch_game_id")) != game_id):
+                continue
+            steam.append(item)
+        steam = mapped.get(game_id, []) + steam
+        names = [game["name"], (entry or {}).get("game_name")]
+        for item in steam:
+            names.extend(item.get(key) for key in ("display_name", "name", "name_en"))
+        game["aliases"] = sorted({name.strip() for name in names if isinstance(name, str) and name.strip()})
+        game["display_name"] = next((item["display_name"] for item in steam if isinstance(item.get("display_name"), str) and item["display_name"].strip()), game["name"])
+        game["steam_appids"] = sorted({str(item["steam_appid"]) for item in steam if re.fullmatch(r"[1-9]\d*", str(item.get("steam_appid", "")))})
+    index["archive_version"] = 1
 
 
 def project_series(frontend: Path, day_path: str | None = None) -> None:
@@ -95,14 +159,8 @@ idempotent, including a category removed from a replacement census.
             _write(path, series)
             game = index["games"].setdefault(game_id, {"name": game_id, "months": []})
             game["months"] = sorted(set(game["months"]) | {month})
-            available = list(series["hours"])
-            for other_month in game["months"]:
-                if other_month != month:
-                    other = json.loads((root / game_id / f"{other_month}.json").read_text())
-                    available.extend(other["hours"])
-            game["first_hour"] = min(available, default=None)
-            game["last_hour"] = max(available, default=None)
             if game_id in metadata and metadata[game_id][0] >= game.get("name_at", ""):
                 game["name_at"], game["name"], game["box_art_url"] = metadata[game_id]
     index["generated_at"] = max((at for hours in index["months"].values() for at in hours.values()), default=None)
+    _archive_metadata(frontend, root, index)
     _write(index_path, index)
