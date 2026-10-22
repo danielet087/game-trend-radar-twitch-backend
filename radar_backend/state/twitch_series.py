@@ -6,7 +6,7 @@ that omitted a game. Raw daily snapshots remain the authoritative evidence.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import math
 from pathlib import Path
@@ -46,6 +46,55 @@ def cover_url(value):
         return None
 
 
+def _calendar_date(value):
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return None
+    try:
+        return value if date.fromisoformat(value).isoformat() == value else None
+    except ValueError:
+        return None
+
+
+def _release_reference(entry, matched_steam, admitted_sources):
+    """A Day 0 reference describes a verified date, not the tracking window.
+
+    Steam's normalized Taiwan calendar date is authoritative even when its
+    timestamp audit records a different day. Different matched editions must
+    agree on the date before they can share a Steam reference.
+    """
+    dates = defaultdict(set)
+    for appid, steam in matched_steam:
+        released = _calendar_date(steam.get("release_date"))
+        if (released and steam.get("release_precision") == "day"
+                and steam.get("release_date_timezone") == "Asia/Taipei"):
+            dates[released].add(appid)
+    if len(dates) == 1:
+        released, appids = next(iter(dates.items()))
+        reference = {"date": released, "source": "Steam 台灣商店", "precision": "day",
+                     "source_type": "steam_taiwan_store_date"}
+        if len(appids) == 1:
+            reference["steam_appid"] = next(iter(appids))
+        return reference
+
+    sources = (entry or {}).get("tracking_sources")
+    if sources is None:
+        sources = {"twitch_new": entry}
+    if not isinstance(sources, dict) or "twitch_new" not in admitted_sources:
+        return None
+    source = sources.get("twitch_new")
+    if not isinstance(source, dict):
+        return None
+    evidence = source.get("enrollment") or {}
+    kind = source.get("release_source") or evidence.get("source")
+    labels = {"igdb_first_release_date": "IGDB 首次發售日",
+              "twitch_original_release_date": "Twitch 首次發售日"}
+    released = _time(source.get("release_at"))
+    if kind in labels and released:
+        return {"date": released.astimezone(TAIPEI).date().isoformat(),
+                "source": labels[kind], "precision": "day", "source_type": kind}
+    return None
+
+
 def _archive_metadata(frontend, root, index):
     """Keep archive discovery independent of the latest live candidate list."""
     def optional(name):
@@ -57,12 +106,18 @@ def _archive_metadata(frontend, root, index):
     tracked = (registry or {}).get("games", {})
     forward = (mapping or {}).get("games", {})
     as_of = max(filter(None, [_time(index.get("generated_at")), _time((registry or {}).get("updated_at"))]), default=None)
-    mapped, covers = defaultdict(list), {}
+    mapped, covers, matched_releases = defaultdict(list), {}, defaultdict(list)
     for appid, entry in forward.items():
         if entry.get("status") == "matched" and cover_url(entry.get("box_art_url")):
             covers[str(entry.get("twitch_game_id"))] = entry["box_art_url"]
         if entry.get("status") == "matched" and isinstance(entry.get("steam"), dict):
             mapped[str(entry.get("twitch_game_id"))].append({**entry["steam"], "steam_appid": appid})
+            # Use the same matched identity decision as archive metadata, but
+            # never borrow release dates from unverified names or aliases.
+            if (re.fullmatch(r"[1-9]\d*", appid)
+                    and str(entry.get("steam_appid", appid)) == appid
+                    and str(entry["steam"].get("steam_appid", appid)) == appid):
+                matched_releases[str(entry.get("twitch_game_id"))].append((appid, entry["steam"]))
 
     def active(source, steam=False):
         if source.get("status") != "active" or as_of is None:
@@ -85,6 +140,11 @@ def _archive_metadata(frontend, root, index):
         entry = tracked.get(game_id)
         game["archive_eligible"] = True
         game["admission_sources"] = qualified_archive_sources(game_id, entry)
+        release = _release_reference(entry, matched_releases.get(game_id, []), game["admission_sources"])
+        if release:
+            game["release_reference"] = release
+        else:
+            game.pop("release_reference", None)
         game["box_art_url"] = cover_url((entry or {}).get("box_art_url")) or covers.get(game_id) or cover_url(game.get("box_art_url"))
         if not entry:
             status = "untracked" if registry is not None else "unknown"
