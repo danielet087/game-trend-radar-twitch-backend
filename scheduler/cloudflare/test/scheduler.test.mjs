@@ -38,7 +38,7 @@ function fixture({ runs = [], active = {}, activeWorkflows = {}, jobs = [], bloc
       if (dispatchError) throw new Error("private upstream details");
       return new Response(null, { status: 204 });
     }
-    if (url.pathname.endsWith("/jobs")) return json({ total_count: 1, jobs: [{ steps: jobs }] });
+    if (url.pathname.endsWith("/jobs")) return json({ total_count: 1, jobs: [{ status: "completed", conclusion: "success", steps: jobs }] });
     if (!url.pathname.endsWith("/runs")) {
       const workflow = url.pathname.split("/").at(-1);
       return json({ id: 45678, state: "active", path: `.github/workflows/${workflow === "369223512" ? "collect.yml" : workflow}` });
@@ -423,6 +423,25 @@ test("HTTP remains unavailable to callers even with all jobs enabled", async () 
 });
 
 const coverageGate = { name: "Require complete growth coverage", status: "completed", conclusion: "success" };
+
+test("quiet workflow failures still receive their next six-hour recovery check", async () => {
+  for (const [offset, id] of ["steam_daily", "steam_growth"].entries()) {
+    for (const [index, hidden] of [
+      { status: "completed", conclusion: "failure", steps: [coverageGate] },
+      { status: "completed", conclusion: "success", steps: [coverageGate,
+        { name: "Persist", status: "completed", conclusion: "failure" }] },
+    ].entries()) {
+      const date = `2026-12-${String(10 + offset * 2 + index).padStart(2, "0")}`;
+      const first = id === "steam_daily" ? `${date}T00:00:00+08:00` : `${date}T01:15:00+08:00`;
+      const retry = id === "steam_daily" ? `${date}T06:00:00+08:00` : `${date}T07:15:00+08:00`;
+      const api = fixture({ runs: [run(iso(first))], responder: url =>
+        url.pathname.endsWith("/jobs") ? json({ total_count: 2, jobs: [hidden,
+          { status: "completed", conclusion: "success", name: "notification", steps: [] }] }) : null });
+      assert.equal((await check(api, retry, onlyJob(id)))[0].action, "dispatch");
+      assert.equal(api.posts().length, 1);
+    }
+  }
+});
 const onlyJob = (id) => ({ ...ENV, RADAR_ENABLED_JOBS: id });
 
 test("daily failures retry six hours later, with the new exact slot and no extra same-slot dispatch", async () => {
