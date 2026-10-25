@@ -363,9 +363,8 @@ function dailySuccessCandidates(job, runs, slot, now) {
 
 async function validatedDailySuccess(job, runs, settings, slot, fetchImpl, now) {
   for (const run of dailySuccessCandidates(job, runs, slot, now)) {
-    if (!job.completionStep) return run;
-    // Older growth workflows reported success even after partial/429 collection.
-    // Require the explicit coverage gate, after publication, in this exact run.
+    // Notification suppression can make a workflow green while its collector
+    // failed. Always inspect actual jobs before suppressing a six-hour retry.
     const response = await request(fetchImpl,
       `${API_ROOT}/repos/${settings.owner}/${settings.repo}/actions/runs/${run.id}/jobs?per_page=100`,
       apiOptions(settings.token), "github_jobs");
@@ -374,6 +373,12 @@ async function validatedDailySuccess(job, runs, settings, slot, fetchImpl, now) 
         !Array.isArray(result.jobs) || result.jobs.length !== result.total_count) {
       throw new WatchdogError("github_jobs_invalid_shape");
     }
+    if (!result.jobs.every((entry) => entry.status === "completed" &&
+        ["success", "skipped"].includes(entry.conclusion) &&
+        !(entry.steps || []).some((step) => ["failure", "timed_out"].includes(step.conclusion)))) continue;
+    if (!job.completionStep) return run;
+    // Growth additionally requires acknowledged complete coverage, even when
+    // the collector successfully persisted a partial/429 cooldown report.
     if (result.jobs.some((entry) => Array.isArray(entry.steps) && entry.steps.some((step) =>
       step.name === job.completionStep && step.status === "completed" && step.conclusion === "success"))) return run;
   }

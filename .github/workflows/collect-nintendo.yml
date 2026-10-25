@@ -35,6 +35,8 @@ concurrency:
 
 jobs:
   collect:
+    # Keep the real job/step failures; the notification job owns the email threshold.
+    continue-on-error: true
     if: vars.RADAR_DATABASE_MIGRATION_PAUSE != '1'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -138,3 +140,18 @@ jobs:
               summary.write(f"其中 {ps5_count} 款有未來一年 PS5 平台發售日期。\n\n")
               summary.write('採 hypes ≥ 30、未來 365 天、平台別確切日期及內容資格驗證。發布結果請對照 Publish 步驟與前端回條。\n')
           PY
+
+  notification:
+    needs: [collect]
+    if: always() && !cancelled() && vars.RADAR_DATABASE_MIGRATION_PAUSE != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: danielet087/game-trend-radar-backend/.github/actions/scheduled-failure-notice@202d8a9945c5cb0a2f182a327dd533ac98d8178e
+        with:
+          workflow-key: collect-nintendo.yml
+          job-name: collect
+          completion-step: "Publish IGDB console data and receipt"
