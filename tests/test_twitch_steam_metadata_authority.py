@@ -54,6 +54,16 @@ def catalog(*games):
             "count": len(games), "games": list(games)}
 
 
+def test_unknown_followers_keep_verified_steam_twitch_identity_mapping():
+    source = authoritative_game()
+    source.update(followers=None, follower_checked_at=None, follower_source=None)
+    mapped, = normalize_steam_catalog(catalog(source), NOW)
+    assert mapped['steam_appid'] == APPID
+    assert mapped['followers'] is None
+    source.pop('twitch_admission')
+    assert normalize_steam_catalog(catalog(source), NOW) == []
+
+
 def tracking():
     source = {"source": "twitch_new", "status": "active", "first_seen_at": OBSERVED,
               "release_at": None, "expires_at": None, "enrollment": enrollment()}

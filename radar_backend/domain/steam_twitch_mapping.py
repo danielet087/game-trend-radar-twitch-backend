@@ -201,8 +201,10 @@ def normalize_steam_catalog(
         if (
             not isinstance(display, str)
             or not isinstance(english, str)
-            or type(followers) is not int
-            or (followers < 0)
+            or not (
+                (type(followers) is int and followers >= 0)
+                or (followers is None and is_twitch_qualified(row))
+            )
         ):
             raise ValueError("Invalid Steam catalog display metadata")
         tags, genres = (_strings(row.get("tags")), _strings(row.get("genres")))
