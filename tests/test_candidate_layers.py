@@ -100,6 +100,7 @@ def test_pure_census_retains_last_broadcaster_row_and_zero_viewers():
         "streamer_count": 2,
         "median_viewer_count": 4050.0,
         "language_streamers": {"zh": 2},
+        "audience_regions": {"zh": {"viewer_count": 8100, "streamer_count": 2, "median_viewer_count": 4050.0}},
     }
 
 
@@ -317,3 +318,4 @@ def test_collect_passes_current_metrics_registry_hints_and_tracking_ports(
     assert result["coverage"]["igdb_hints_status"] == "unavailable_or_partial"
     assert result["coverage"]["census_helix_calls_excluding_retries"] == 1
     assert result["tracking_state"]["games"] == {}
+

@@ -406,6 +406,7 @@ def observed_rows(payload: dict) -> list[dict]:
                     "measurement_started_at",
                     "measurement_finished_at",
                     "filtered_audience",
+                    "audience_regions",
                 )
             )
         ):
@@ -645,6 +646,24 @@ def validate_snapshot(
             validate_filtered_audience_fn(
                 row["filtered_audience"], viewers=viewers, streamers=streamers
             )
+        if "audience_regions" in row:
+            regions = row["audience_regions"]
+            chinese = regions.get("zh") if isinstance(regions, dict) else None
+            if not isinstance(chinese, dict):
+                raise ValueError("Invalid Chinese audience metrics")
+            regional_viewers, regional_streamers, regional_median = (
+                chinese.get(key) for key in ("viewer_count", "streamer_count", "median_viewer_count")
+            )
+            if (type(regional_viewers) is not int or not 0 <= regional_viewers <= viewers
+                    or type(regional_streamers) is not int or not 0 <= regional_streamers <= streamers
+                    or regional_streamers == 0 and (regional_viewers != 0 or regional_median is not None)
+                    or regional_streamers > 0 and (type(regional_median) not in (float, int)
+                        or not math_module.isfinite(regional_median)
+                        or not 0 <= regional_median <= regional_viewers)):
+                raise ValueError("Invalid Chinese audience metrics")
+            if "filtered_audience" in chinese:
+                validate_filtered_audience_fn(chinese["filtered_audience"],
+                                             viewers=regional_viewers, streamers=regional_streamers)
         if schedule is not None:
             started, completed = (
                 parse_timestamp_fn(payload[key])
@@ -692,6 +711,7 @@ def history_observation(payload: dict, scheduled: bool, *, observed_rows_fn) -> 
                     for key in (
                         "release_experiment",
                         "filtered_audience",
+                        "audience_regions",
                         "tracking",
                         "steam_matches",
                         "observation_status",
@@ -745,3 +765,4 @@ def collection_receipt(
         "run_id": payload["collection_schedule"]["run_id"],
         "history_path": relative,
     }
+
