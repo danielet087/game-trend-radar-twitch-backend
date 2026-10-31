@@ -1,6 +1,8 @@
 """Pure candidate observations, census validation and release metadata rules."""
 
 from __future__ import annotations
+
+from radar_backend.domain.twitch_audience import chinese_channels
 from datetime import datetime
 from typing import Any
 
@@ -73,12 +75,18 @@ def accumulate_streams(channels, streams, game_id, *, incomplete_error):
 
 def census_metrics(channels, *, counter_type, median_fn):
     counts = [row["viewer_count"] for row in channels.values()]
+    chinese = [row["viewer_count"] for row in chinese_channels(channels.values())]
     languages = counter_type((str(row.get("language") or "other") for row in channels.values()))
     return {
         "viewer_count": sum(counts),
         "streamer_count": len(counts),
         "median_viewer_count": median_fn(counts) if counts else None,
         "language_streamers": dict(languages.most_common()),
+        "audience_regions": {"zh": {
+            "viewer_count": sum(chinese),
+            "streamer_count": len(chinese),
+            "median_viewer_count": median_fn(chinese) if chinese else None,
+        }},
     }
 
 
@@ -120,3 +128,4 @@ def apply_release_hint_rows(
             "release_band": band,
             "confirms_twitch_new_badge": False,
         }
+

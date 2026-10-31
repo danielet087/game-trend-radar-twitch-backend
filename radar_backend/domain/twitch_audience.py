@@ -10,6 +10,12 @@ MIN_FOLLOWERS = 1000
 MIN_VIEWERS = 10
 
 
+def chinese_channels(channels):
+    """Use the broadcast language declared to Twitch, never names or location."""
+    return [row for row in channels if str(row.get("language") or "").strip()
+            .lower().replace("_", "-").split("-")[0] == "zh"]
+
+
 def _fresh_record(
     row: object, now: datetime, *, parse_timestamp, timestamp, max_age
 ) -> dict | None:
@@ -52,3 +58,4 @@ def summarize_metrics(
         "excluded_low_follower_count": low_followers,
         "unknown_follower_count": unknown,
     }
+

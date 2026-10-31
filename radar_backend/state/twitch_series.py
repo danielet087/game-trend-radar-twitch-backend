@@ -137,6 +137,18 @@ def _archive_metadata(frontend, root, index):
         game.update(first_hour=min(samples, default=None), last_hour=max(samples, default=None),
                     sample_count=len(samples), viewer_sample_count=len(viewers),
                     peak_viewer_count=max(viewers, default=None))
+        chinese_samples = {hour: row["audience_regions"]["zh"] for hour, row in samples.items()
+                           if isinstance(row.get("audience_regions", {}).get("zh"), dict)}
+        chinese_viewers = [row.get("viewer_count") for row in chinese_samples.values()]
+        chinese_viewers = [value for value in chinese_viewers
+                          if type(value) in {int, float} and math.isfinite(value) and value >= 0]
+        game["audience_regions"] = {"zh": {
+            "first_hour": min(chinese_samples, default=None),
+            "last_hour": max(chinese_samples, default=None),
+            "sample_count": len(chinese_samples),
+            "viewer_sample_count": len(chinese_viewers),
+            "peak_viewer_count": max(chinese_viewers, default=None),
+        }}
         entry = tracked.get(game_id)
         game["archive_eligible"] = True
         game["admission_sources"] = qualified_archive_sources(game_id, entry)
@@ -227,7 +239,7 @@ idempotent, including a category removed from a replacement census.
                         or game.get("observation_freshness") == "stale"):
                     continue
                 rows[game_id] = {"generated_at": finished, **{
-                    name: game[name] for name in ("viewer_count", "streamer_count", "filtered_audience") if name in game
+                    name: game[name] for name in ("viewer_count", "streamer_count", "filtered_audience", "audience_regions") if name in game
                 }}
                 if game_id not in metadata or key >= metadata[game_id][0]:
                     metadata[game_id] = (key, str(game.get("game_name") or game_id), game.get("box_art_url"))
@@ -254,3 +266,4 @@ idempotent, including a category removed from a replacement census.
     index["generated_at"] = max((at for hours in index["months"].values() for at in hours.values()), default=None)
     _archive_metadata(frontend, root, index)
     _write(index_path, index)
+

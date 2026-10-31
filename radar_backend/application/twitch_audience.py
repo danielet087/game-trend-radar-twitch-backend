@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from radar_backend.domain.twitch_audience import chinese_channels
+
 
 class FollowerResolver:
     """Share successful and unknown totals while honoring the original budgets."""
@@ -184,9 +186,25 @@ def attach_filtered_audience(
     info,
     rule,
 ) -> dict:
+    class SharedFollowers:
+        """Resolve a broadcaster once for both populations in this census."""
+        def __init__(self):
+            self.totals = {}
+
+        def resolve(self, user_id):
+            if user_id not in self.totals:
+                self.totals[user_id] = resolver.resolve(user_id)
+            return self.totals[user_id]
+
     try:
         for index, row in enumerate(sorted(candidates, key=priority), 1):
-            row["filtered_audience"] = filtered_metrics(channels_by_game[row["game_id"]], resolver)
+            shared = SharedFollowers()
+            row["filtered_audience"] = filtered_metrics(channels_by_game[row["game_id"]], shared)
+            channels = chinese_channels(channels_by_game[row["game_id"]])
+            regional = row.setdefault("audience_regions", {}).setdefault("zh", {})
+            regional.update(viewer_count=sum(channel["viewer_count"] for channel in channels),
+                            streamer_count=len(channels),
+                            filtered_audience=filtered_metrics(channels, shared))
             metrics = row["filtered_audience"]
             info(
                 "Filtered audience %d/%d, game %s: %s, %d qualified channels, %d unknown; %d lookups / %d cache hits",
@@ -222,3 +240,4 @@ def attach_filtered_audience(
         ),
         "cache_saved": saved,
     }
+

@@ -250,3 +250,12 @@ python -m scripts.probe_igdb_hypes --game-id 366896 --output output/igdb_hypes.j
 - [IGDB API：認證與遊戲發售資料](https://api-docs.igdb.com/)
 - [Glance：14 天條件的開源實作](https://github.com/glanceapp/glance/blob/372466c6d75318670dc66e4e452179350fc50c97/internal/glance/widget-twitch-top-games.go)
 - [GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
+
+# Twitch 語言區域
+
+每輪完整的類別 census 同時保存全球及中文區量測。原有頂層觀眾、開台與篩選中位數仍代表全球；`audience_regions.zh` 保存直播語言為 `zh` 的頻道量測（亦容許 `zh-TW` 等區域碼），不由標題、主播姓名或所在地推定語言。全球包含中文區。
+
+中文區總觀眾與開台數涵蓋該區所有頻道；篩選中位數沿用 Followers > 1,000、觀眾 ≥ 10、追隨數 24 小時有效的規則。兩個母體共用追隨數查詢；非中文頻道追隨數未知不影響完整中文母體的中位數。主播跨頁重複時，以原有去重結果的最後直播語言為準。
+
+每日歷史、單款月資料與歷史索引一併保存中文量測。舊紀錄沒有語言分區時維持缺值；完整收集但沒有中文頻道才記為 0 人／0 台，中位數仍為 null。新作收錄與追蹤期限沿用原有全球資格，不因切換觀看區域改變。
+
