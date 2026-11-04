@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "consecutive_failures": 1,
+  "consecutive_failures": 2,
   "alerted": false,
-  "last_run_id": 41553307975,
+  "last_run_id": 41747307286,
   "last_run_attempt": 1,
   "last_outcome": "failure",
-  "updated_at": "2026-11-03T00:30:44.927Z"
+  "updated_at": "2026-11-04T00:30:43.311Z"
 }
