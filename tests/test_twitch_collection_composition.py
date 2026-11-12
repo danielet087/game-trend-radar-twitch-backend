@@ -128,6 +128,8 @@ class FakeClient:
         if endpoint == "games":
             return {"data": [], "pagination": {}}
         assert endpoint == "streams"
+        if "language" in params:
+            return {"data": [], "pagination": {}}
         game_id = params["game_id"]
         channels = [
             {
@@ -220,6 +222,7 @@ def test_collection_job_uses_real_census_audience_tracking_and_writes_only_compl
         )
         assert payload["collection_schedule"]["target_slot"] == STAMP
         assert payload["coverage"]["collection_complete"] is True
+        assert payload["coverage"]["chinese_discovery"]["status"] == "scanned"
         assert payload["coverage"]["tracked_outside_discovery_count"] == 1
         one = payload["candidate_games"][0]
         assert (one["viewer_count"], one["streamer_count"], one["median_viewer_count"]) == (

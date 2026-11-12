@@ -4,6 +4,14 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
+
+from radar_backend.application.twitch_chinese import (
+    SCAN_ERRORS, audit_censuses, discovery_shortlist, scan_codes, scan_languages,
+)
+from radar_backend.domain.twitch_audience import CHINESE_DISCOVERY_MIN_VIEWERS
+
+TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 def initialize_page_reader(
@@ -121,6 +129,7 @@ def collect_candidates(
     now: datetime | None,
     category_page_size: int,
     include_filtered_audience: bool,
+    include_chinese_discovery: bool,
     followers_cache_path: str | Path,
     followers_max_calls: int | None,
     followers_max_seconds: float | None,
@@ -166,6 +175,8 @@ def collect_candidates(
     ):
         raise ValueError("Threshold and limits must be positive; page size must be 1..100")
     clock = now or datetime_type.now(timezone_type.utc)
+    chinese_evening = include_chinese_discovery and clock.astimezone(TAIPEI).hour >= 19
+    retain_channels = include_filtered_audience or chinese_evening
     tracking = normalize_tracking_state(tracking_state, clock, non_game_ids=non_game_ids)
     observations = load_verifications(registry_path)
     release_dates = load_release_dates(release_dates_path)
@@ -348,7 +359,7 @@ def collect_candidates(
                 continue
             excluded_by_id.pop(game_id, None)
             metrics = category_metrics(
-                reader, game_id, max_stream_pages, retain_channels=include_filtered_audience
+                reader, game_id, max_stream_pages, retain_channels=retain_channels
             )
             channels = metrics.pop("_channels", None)
             measured_count += 1
@@ -457,7 +468,7 @@ def collect_candidates(
         if entry["status"] != "active":
             continue
         metrics = category_metrics(
-            reader, game_id, max_stream_pages, retain_channels=include_filtered_audience
+            reader, game_id, max_stream_pages, retain_channels=retain_channels
         )
         channels = metrics.pop("_channels", None)
         measured_count += 1
@@ -472,8 +483,95 @@ def collect_candidates(
         }
         if channels is not None:
             channels_by_game[game_id] = channels
+    chinese_rows, chinese_calls = {}, 0
+    chinese_report = {"status": "outside_evening", "min_viewers": CHINESE_DISCOVERY_MIN_VIEWERS}
+    if chinese_evening:
+        # Extra discovery and audit calls share the remaining census budget.
+        # Cap their retries separately so they cannot use up the main deadline.
+        chinese_deadline = min(deadline - 5, monotonic() + 60)
+        chinese_reader = page_reader(client, min(60, max_api_calls - reader.calls),
+                                     deadline=chinese_deadline, monotonic=monotonic)
+        if isinstance(client, client_type):
+            client.collection_deadline = chinese_deadline
+        try:
+            languages = scan_codes(channels_by_game)
+            sampled, language_coverage = scan_languages(chinese_reader, languages, 6)
+            blocked = (set(tracking["games"]) | candidates_by_id.keys()
+                       | excluded_by_id.keys() | non_game_ids.keys())
+            shortlist = discovery_shortlist(sampled, blocked)
+            chinese_report.update(
+                status="scanned" if language_coverage["zh"] in {"complete", "page_limit"} else "partial",
+                directory_languages=language_coverage,
+                sampled_streams=len(sampled),
+                shortlisted_game_ids=shortlist,
+                awaiting_release_evidence=[],
+                census_failures=0,
+                audit=audit_censuses(chinese_reader, channels_by_game, [
+                    code for code, status in language_coverage.items() if status in {"complete", "page_limit"}
+                ]),
+            )
+            if shortlist:
+                metadata, _ = chinese_reader.get("games", {"id": shortlist})
+                found = {str(game.get("id")): game for game in metadata
+                         if isinstance(game.get("name"), str) and game["name"]}
+                checked_at = now or datetime_type.now(timezone_type.utc)
+                if include_release_hints:
+                    to_check = [game for game in found.values()
+                                if str(game.get("igdb_id") or "").isdigit()
+                                and str(game["igdb_id"]) not in requested_igdb_ids]
+                    if to_check:
+                        chinese_hints, _ = release_hints(client, to_check, checked_at,
+                                                         deadline=chinese_deadline, monotonic=monotonic)
+                        hints.update(chinese_hints)
+                for game_id in shortlist:
+                    game = found.get(game_id)
+                    if game is None:
+                        continue
+                    verification = verification_for(game_id, observations, checked_at)
+                    hint = hints.get(str(game.get("igdb_id")), {})
+                    prediction = evaluate_date(
+                        hint.get("first_release_date"), hint.get("checked_at"), checked_at,
+                        source="igdb_first_release_date",
+                    )
+                    if verification["status"] == "not_new" or prediction.get("predicted_new") is False:
+                        continue
+                    dated = release_dates.get(game_id, {})
+                    original = evaluate_date(
+                        dated.get("original_release_date"), dated.get("observed_at"), checked_at,
+                        source="twitch_original_release_date",
+                    )
+                    if not (verification["status"] == "new" or prediction.get("predicted_new")
+                            or original.get("predicted_new")):
+                        chinese_report["awaiting_release_evidence"].append(game_id)
+                        continue
+                    try:
+                        metrics = category_metrics(
+                            chinese_reader, game_id, max_stream_pages, retain_channels=include_filtered_audience
+                        )
+                    except SCAN_ERRORS:
+                        chinese_report["census_failures"] += 1
+                        continue
+                    channels = metrics.pop("_channels", None)
+                    measured_count += 1
+                    measured_ids.add(game_id)
+                    if metrics["audience_regions"]["zh"]["viewer_count"] < CHINESE_DISCOVERY_MIN_VIEWERS:
+                        continue
+                    igdb_predictions[game_id] = prediction
+                    chinese_rows[game_id] = {
+                        "game_id": game_id, "game_name": game["name"],
+                        "box_art_url": game.get("box_art_url"), "igdb_id": game.get("igdb_id") or None,
+                        "verification": verification, **metrics,
+                    }
+                    if channels is not None:
+                        channels_by_game[game_id] = channels
+        except SCAN_ERRORS as error:
+            chinese_report.update(status="partial", error=type(error).__name__)
+        finally:
+            chinese_calls = chinese_reader.calls
+            if isinstance(client, client_type):
+                client.collection_deadline = deadline
     candidates, excluded = (list(candidates_by_id.values()), list(excluded_by_id.values()))
-    measured_rows = {**retained_by_id, **candidates_by_id}
+    measured_rows = {**retained_by_id, **candidates_by_id, **chinese_rows}
     hints_status = (
         "disabled"
         if not include_release_hints
@@ -505,7 +603,7 @@ def collect_candidates(
         candidates, excluded, hints, release_dates, finished, igdb_predictions=igdb_predictions
     )
     retained_only = [
-        row for game_id, row in retained_by_id.items() if game_id not in candidates_by_id
+        row for game_id, row in measured_rows.items() if game_id not in candidates_by_id
     ]
     attach_experiments(
         retained_only, [], hints, release_dates, finished, igdb_predictions=igdb_predictions
@@ -541,6 +639,7 @@ def collect_candidates(
             allow_twitch_enrollment=not (
                 prediction.get("status") == "evaluated" and prediction.get("predicted_new") is False
             ),
+            chinese_discovery=row["game_id"] in chinese_rows,
         )
     tracking["updated_at"] = timestamp(finished)
     tracked = [
@@ -549,6 +648,11 @@ def collect_candidates(
         if tracking["games"].get(row["game_id"], {}).get("status") == "active"
     ]
     tracked.sort(key=lambda row: (-row["viewer_count"], row["game_id"]))
+    if chinese_evening:
+        chinese_report.update(
+            helix_calls_excluding_retries=chinese_calls,
+            enrolled_game_ids=[row["game_id"] for row in tracked if row["game_id"] in chinese_rows],
+        )
     # Reverse lookup enriches intake after enrollment; it never writes the catalog.
     discoveries = None
     if steam_catalog is not None or steam_discovery_state is not None:
@@ -595,9 +699,10 @@ def collect_candidates(
             "igdb_categories_unknown": sum(
                 (p["status"] == "unknown" for p in igdb_predictions.values())
             ),
-            "helix_calls_excluding_retries": reader.calls
+            "helix_calls_excluding_retries": reader.calls + chinese_calls
             + (follower_coverage["follower_lookup_calls"] if follower_coverage else 0),
-            "census_helix_calls_excluding_retries": reader.calls,
+            "census_helix_calls_excluding_retries": reader.calls + chinese_calls,
+            **({"chinese_discovery": chinese_report} if include_chinese_discovery else {}),
             **({"filtered_audience": follower_coverage} if follower_coverage else {}),
             "global_metrics_are_sampled": False,
             "is_simultaneous_global_snapshot": False,

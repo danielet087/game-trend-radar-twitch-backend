@@ -8,12 +8,17 @@ RULE = "followers_gt_1000_viewers_gte_10_v1"
 MAX_AGE = timedelta(hours=24)
 MIN_FOLLOWERS = 1000
 MIN_VIEWERS = 10
+CHINESE_DISCOVERY_MIN_VIEWERS = 100
+
+
+def chinese_language(value):
+    code = str(value or "").strip().lower().replace("_", "-")
+    return code if code.split("-", 1)[0] == "zh" else None
 
 
 def chinese_channels(channels):
     """Use the broadcast language declared to Twitch, never names or location."""
-    return [row for row in channels if str(row.get("language") or "").strip()
-            .lower().replace("_", "-").split("-")[0] == "zh"]
+    return [row for row in channels if chinese_language(row.get("language"))]
 
 
 def _fresh_record(

@@ -86,6 +86,7 @@ def census_metrics(channels, *, counter_type, median_fn):
             "viewer_count": sum(chinese),
             "streamer_count": len(chinese),
             "median_viewer_count": median_fn(chinese) if chinese else None,
+            "largest_stream_viewer_count": max(chinese, default=0),
         }},
     }
 

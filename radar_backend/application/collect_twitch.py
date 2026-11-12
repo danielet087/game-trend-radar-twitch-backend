@@ -41,6 +41,7 @@ def collect_observations(
         release_dates_path=request.release_dates,
         include_release_hints=not request.no_release_hints,
         include_filtered_audience=not request.no_filtered_audience,
+        include_chinese_discovery=True,
         followers_cache_path=request.followers_cache,
         followers_max_calls=request.followers_max_calls,
         followers_max_seconds=request.followers_max_seconds,
