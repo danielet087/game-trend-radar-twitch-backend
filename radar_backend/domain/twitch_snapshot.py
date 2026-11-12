@@ -661,6 +661,11 @@ def validate_snapshot(
                         or not math_module.isfinite(regional_median)
                         or not 0 <= regional_median <= regional_viewers)):
                 raise ValueError("Invalid Chinese audience metrics")
+            if "largest_stream_viewer_count" in chinese:
+                largest = chinese["largest_stream_viewer_count"]
+                if (type(largest) is not int or not 0 <= largest <= regional_viewers
+                        or largest * regional_streamers < regional_viewers):
+                    raise ValueError("Invalid Chinese largest stream count")
             if "filtered_audience" in chinese:
                 validate_filtered_audience_fn(chinese["filtered_audience"],
                                              viewers=regional_viewers, streamers=regional_streamers)
@@ -681,11 +686,13 @@ def validate_snapshot(
 
 def history_observation(payload: dict, scheduled: bool, *, observed_rows_fn) -> dict:
     """Project complete observations without dropping optional release evidence."""
+    chinese = payload["coverage"].get("chinese_discovery")
     return {
         "generated_at": payload["generated_at"],
         "collection_started_at": payload["collection_started_at"],
         "min_viewers": payload["min_viewers"],
         "stop_reason": payload["coverage"]["stop_reason"],
+        **({"chinese_discovery": chinese} if chinese and chinese.get("status") != "outside_evening" else {}),
         **(
             {"collection_schedule": dict(payload["collection_schedule"])}
             if scheduled

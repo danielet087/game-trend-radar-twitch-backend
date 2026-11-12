@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import math
 import re
 
+from radar_backend.domain.twitch_audience import CHINESE_DISCOVERY_MIN_VIEWERS
 from radar_backend.domain.twitch_candidates import NON_GAME_IDS
 from radar_backend.domain.twitch_tracking import TRACKING_DAYS
 
@@ -46,8 +47,9 @@ def qualified_archive_sources(game_id, entry):
             continue
         if key == "twitch_new" and evidence.get("source") in TWITCH_EVIDENCE:
             viewers, minimum = evidence.get("viewer_count"), evidence.get("min_viewers")
+            floor = CHINESE_DISCOVERY_MIN_VIEWERS if evidence.get("audience_region") == "zh" else 7000
             if (type(viewers) in {int, float} and type(minimum) in {int, float}
-                    and math.isfinite(viewers) and math.isfinite(minimum) and viewers >= minimum >= 7000):
+                    and math.isfinite(viewers) and math.isfinite(minimum) and viewers >= minimum >= floor):
                 qualified.append(key)
         elif re.fullmatch(r"steam:[1-9]\d*", key) and evidence.get("source") == "steam_recent_release":
             appid, released = key[6:], _time(evidence.get("release_at"))

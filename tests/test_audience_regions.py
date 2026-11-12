@@ -23,6 +23,7 @@ def test_regional_census_uses_latest_deduplicated_broadcast_language():
     assert (result['viewer_count'], result['streamer_count']) == (1850, 5)
     assert result['audience_regions']['zh'] == {
         'viewer_count': 200, 'streamer_count': 2, 'median_viewer_count': 100,
+        'largest_stream_viewer_count': 200,
     }
     assert '"user_id"' not in json.dumps(result)
 

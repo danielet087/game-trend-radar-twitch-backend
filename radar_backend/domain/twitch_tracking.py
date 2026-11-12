@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta
 
+from radar_backend.domain.twitch_audience import CHINESE_DISCOVERY_MIN_VIEWERS
 from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
 
 TRACKING_DAYS = 30
@@ -513,6 +514,7 @@ def enroll_observation(
     non_game_ids=(),
     eligibility_at: datetime | None = None,
     allow_twitch_enrollment: bool = True,
+    chinese_discovery: bool = False,
     deepcopy_fn=None,
     timestamp_fn=None,
     sources_fn=None,
@@ -550,14 +552,24 @@ def enroll_observation(
         return None
     entry = state["games"].get(game_id)
     eligible_time = eligibility_at or observed_at
-    count = row.get("viewer_count")
+    audience = row.get("audience_regions", {}).get("zh", {}) if chinese_discovery else row
+    count = audience.get("viewer_count")
+    minimum = CHINESE_DISCOVERY_MIN_VIEWERS if chinese_discovery else min_viewers
     evidence_source = admission_evidence_fn(row, eligible_time)
     qualifies = (
         allow_twitch_enrollment
         and type(count) in (int, float)
-        and (count >= min_viewers)
+        and (count >= minimum)
         and bool(evidence_source)
     )
+    enrollment = {
+        "source": evidence_source,
+        "observed_at": timestamp_fn(observed_at),
+        "viewer_count": count,
+        "min_viewers": minimum,
+    }
+    if chinese_discovery:
+        enrollment["audience_region"] = "zh"
     if entry is None:
         if not qualifies:
             return None
@@ -567,12 +579,7 @@ def enroll_observation(
             "first_seen_at": timestamp_fn(observed_at),
             "status": "active",
             "tracking_sources": {},
-            "enrollment": {
-                "source": evidence_source,
-                "observed_at": timestamp_fn(observed_at),
-                "viewer_count": count,
-                "min_viewers": min_viewers,
-            },
+            "enrollment": enrollment.copy(),
         }
     if entry["status"] == "excluded":
         return None
@@ -581,12 +588,7 @@ def enroll_observation(
         sources["twitch_new"] = {
             "source": "twitch_new",
             "first_seen_at": timestamp_fn(observed_at),
-            "enrollment": {
-                "source": evidence_source,
-                "observed_at": timestamp_fn(observed_at),
-                "viewer_count": count,
-                "min_viewers": min_viewers,
-            },
+            "enrollment": enrollment,
             "status": "active",
             "status_reason": "awaiting_release_date",
         }

@@ -100,7 +100,8 @@ def test_pure_census_retains_last_broadcaster_row_and_zero_viewers():
         "streamer_count": 2,
         "median_viewer_count": 4050.0,
         "language_streamers": {"zh": 2},
-        "audience_regions": {"zh": {"viewer_count": 8100, "streamer_count": 2, "median_viewer_count": 4050.0}},
+        "audience_regions": {"zh": {"viewer_count": 8100, "streamer_count": 2, "median_viewer_count": 4050.0,
+                                   "largest_stream_viewer_count": 8100}},
     }
 
 

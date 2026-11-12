@@ -131,6 +131,7 @@ def enroll_observation(
     non_game_ids=(),
     eligibility_at: datetime | None = None,
     allow_twitch_enrollment: bool = True,
+    chinese_discovery: bool = False,
 ) -> dict | None:
     """Add qualified Twitch membership, then store one real census observation."""
     return rules.enroll_observation(
@@ -141,6 +142,7 @@ def enroll_observation(
         non_game_ids=non_game_ids,
         eligibility_at=eligibility_at,
         allow_twitch_enrollment=allow_twitch_enrollment,
+        chinese_discovery=chinese_discovery,
         deepcopy_fn=deepcopy,
         timestamp_fn=timestamp,
         sources_fn=_sources,

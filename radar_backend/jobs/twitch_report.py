@@ -17,7 +17,10 @@ def report_collection(payload: dict, args: CollectionRequest, path: Path, *, sum
         f"{len(payload['pending_verification'])} pending -> {path}"
     )
     print(f"Persistent new-game observation: {len(payload.get('tracked_games', []))} active games; "
-          "the 7,000-viewer threshold applies only to initial enrollment.")
+          f"global discovery threshold: {args.min_viewers:,} viewers.")
+    chinese = payload["coverage"].get("chinese_discovery")
+    if chinese and chinese["status"] != "outside_evening":
+        print(f"Chinese evening discovery: {json.dumps(chinese, ensure_ascii=False)}")
     steam_summary = payload.get("steam_catalog_summary", {})
     if steam_summary:
         print(f"Steam/Twitch mapping: {json.dumps(steam_summary, ensure_ascii=False)}")
@@ -42,7 +45,7 @@ def report_collection(payload: dict, args: CollectionRequest, path: Path, *, sum
         with open(summary_path, "a", encoding="utf-8") as summary:
             summary.write(
                 "### Twitch 候選掃描\n\n"
-                f"- 門檻：{args.min_viewers:,} 人\n"
+                f"- 全球新作門檻：{args.min_viewers:,} 人\n"
                 f"- 達標候選：{len(payload['candidate_games'])} 款\n"
                 f"- 持續觀測新作：{len(payload.get('tracked_games', []))} 款（收錄後低於門檻仍持續）\n"
                 f"- 已確認全新：{len(payload['top_games'])} 款\n"
@@ -64,6 +67,14 @@ def report_collection(payload: dict, args: CollectionRequest, path: Path, *, sum
                 "IGDB 日期差 < 30 天用於 Twitch 新作來源；Steam 近期上市來源依 Steam 台灣日期獨立判定，任一來源有效即持續收集。\n"
                 "缺少 Twitch 原始日期時保持未知；IGDB 結果分開顯示，不補成 Twitch 原始日期。\n"
             )
+            if chinese and chinese["status"] != "outside_evening":
+                summary.write(
+                    "\n### 中文新作補掃與漏台抽查\n\n"
+                    f"- 中文新作門檻 {chinese['min_viewers']} 人\n"
+                    f"- 本輪新增追蹤 {len(chinese.get('enrolled_game_ids', []))} 款\n"
+                    f"- 比對 {len(chinese.get('audit', {}).get('games', []))} 款遊戲\n\n"
+                    "掃描時間有先後，頻道差異供抽查。\n"
+                )
             if audience:
                 summary.write(
                     "\n### 篩選中位數\n\n"
