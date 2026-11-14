@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from radar_backend.domain.twitch_audience import valid_viewer_tiers
+
 
 def merge_discovery_state(
     existing: dict | None,
@@ -406,6 +408,7 @@ def observed_rows(payload: dict) -> list[dict]:
                     "measurement_started_at",
                     "measurement_finished_at",
                     "filtered_audience",
+                    "streamer_counts_above_viewers",
                     "audience_regions",
                 )
             )
@@ -642,6 +645,9 @@ def validate_snapshot(
             or (not 0 <= middle <= viewers)
         ):
             raise ValueError("Invalid median")
+        tiers = row.get("streamer_counts_above_viewers")
+        if "streamer_counts_above_viewers" in row and not valid_viewer_tiers(tiers, viewers=viewers, streamers=streamers):
+            raise ValueError("Invalid global viewer tiers")
         if "filtered_audience" in row:
             validate_filtered_audience_fn(
                 row["filtered_audience"], viewers=viewers, streamers=streamers
@@ -666,6 +672,13 @@ def validate_snapshot(
                 if (type(largest) is not int or not 0 <= largest <= regional_viewers
                         or largest * regional_streamers < regional_viewers):
                     raise ValueError("Invalid Chinese largest stream count")
+            if "streamer_counts_above_viewers" in chinese:
+                regional_tiers = chinese["streamer_counts_above_viewers"]
+                if (not valid_viewer_tiers(regional_tiers, viewers=regional_viewers, streamers=regional_streamers)
+                        or tiers is not None and not valid_viewer_tiers(
+                            [total - local for total, local in zip(tiers, regional_tiers)],
+                            viewers=viewers - regional_viewers, streamers=streamers - regional_streamers)):
+                    raise ValueError("Invalid Chinese viewer tiers")
             if "filtered_audience" in chinese:
                 validate_filtered_audience_fn(chinese["filtered_audience"],
                                              viewers=regional_viewers, streamers=regional_streamers)
@@ -718,6 +731,7 @@ def history_observation(payload: dict, scheduled: bool, *, observed_rows_fn) -> 
                     for key in (
                         "release_experiment",
                         "filtered_audience",
+                        "streamer_counts_above_viewers",
                         "audience_regions",
                         "tracking",
                         "steam_matches",

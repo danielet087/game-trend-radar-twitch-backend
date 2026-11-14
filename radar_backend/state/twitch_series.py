@@ -239,7 +239,8 @@ idempotent, including a category removed from a replacement census.
                         or game.get("observation_freshness") == "stale"):
                     continue
                 rows[game_id] = {"generated_at": finished, **{
-                    name: game[name] for name in ("viewer_count", "streamer_count", "filtered_audience", "audience_regions") if name in game
+                    name: game[name] for name in ("viewer_count", "streamer_count", "filtered_audience",
+                                                  "streamer_counts_above_viewers", "audience_regions") if name in game
                 }}
                 if game_id not in metadata or key >= metadata[game_id][0]:
                     metadata[game_id] = (key, str(game.get("game_name") or game_id), game.get("box_art_url"))

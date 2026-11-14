@@ -21,9 +21,11 @@ def test_regional_census_uses_latest_deduplicated_broadcast_language():
     ])
     result = category_metrics(PageReader(client, 10), '1')
     assert (result['viewer_count'], result['streamer_count']) == (1850, 5)
+    assert result['streamer_counts_above_viewers'] == [4, 3, 3]
     assert result['audience_regions']['zh'] == {
         'viewer_count': 200, 'streamer_count': 2, 'median_viewer_count': 100,
         'largest_stream_viewer_count': 200,
+        'streamer_counts_above_viewers': [1, 1, 1],
     }
     assert '"user_id"' not in json.dumps(result)
 
@@ -60,11 +62,15 @@ def regional_snapshot():
 
 def test_regions_survive_daily_and_monthly_projection_and_archive_summary(tmp_path):
     payload = regional_snapshot()
+    row = payload['tracked_games'][0]
+    row['streamer_counts_above_viewers'] = [2, 1, 0]
+    row['audience_regions']['zh']['streamer_counts_above_viewers'] = [1, 0, 0]
     daily = store_snapshot(payload, tmp_path)
     project_series(tmp_path, daily)
     raw = json.loads((tmp_path / daily).read_text())['hours']['2026-09-28T16:00:00Z']['games'][0]
     chunk = json.loads((tmp_path / 'data/twitch_series/1/2026-09.json').read_text())
     assert chunk['hours']['2026-09-28T16:00:00Z']['audience_regions'] == raw['audience_regions']
+    assert chunk['hours']['2026-09-28T16:00:00Z']['streamer_counts_above_viewers'] == raw['streamer_counts_above_viewers'] == [2, 1, 0]
     game = json.loads((tmp_path / 'data/twitch_series/index.json').read_text())['games']['1']
     assert game['peak_viewer_count'] == 100
     assert game['audience_regions']['zh']['peak_viewer_count'] == 40
@@ -93,4 +99,19 @@ def test_candidate_and_tracked_regions_must_agree(tmp_path):
     payload['candidate_games'] = deepcopy(payload['tracked_games'])
     payload['candidate_games'][0]['audience_regions']['zh']['viewer_count'] = 30
     with pytest.raises(ValueError, match='disagree'):
+        store_snapshot(payload, tmp_path)
+
+
+def test_viewer_tier_boundaries_and_impossible_counts(tmp_path):
+    values = [0, 30, 31, 50, 51, 100, 101]
+    client = FakeClient([('streams', page([stream(1, i, viewers) for i, viewers in enumerate(values, 1)]))])
+    row = category_metrics(PageReader(client, 10), '1')
+    assert row['streamer_counts_above_viewers'] == [5, 3, 1]
+    assert row['audience_regions']['zh']['streamer_counts_above_viewers'] == [5, 3, 1]
+
+    payload = regional_snapshot()
+    row = payload['tracked_games'][0]
+    row['streamer_counts_above_viewers'] = [1, 1, 0]
+    row['audience_regions']['zh']['streamer_counts_above_viewers'] = [1, 0, 0]
+    with pytest.raises(ValueError, match='Chinese viewer tiers'):
         store_snapshot(payload, tmp_path)
