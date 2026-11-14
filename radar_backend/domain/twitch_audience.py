@@ -9,6 +9,22 @@ MAX_AGE = timedelta(hours=24)
 MIN_FOLLOWERS = 1000
 MIN_VIEWERS = 10
 CHINESE_DISCOVERY_MIN_VIEWERS = 100
+VIEWER_TIERS = (30, 50, 100)
+
+
+def streamer_counts_above_viewers(viewer_counts):
+    """Count channels strictly above each viewer tier in the census."""
+    return [sum(viewers > threshold for viewers in viewer_counts) for threshold in VIEWER_TIERS]
+
+
+def valid_viewer_tiers(counts, *, viewers, streamers):
+    if (not isinstance(counts, list) or len(counts) != len(VIEWER_TIERS)
+            or not all(type(count) is int and 0 <= count <= streamers for count in counts)
+            or counts != sorted(counts, reverse=True)):
+        return False
+    minimum_viewers = sum((threshold - previous) * count
+                          for threshold, previous, count in zip(VIEWER_TIERS, (-1, *VIEWER_TIERS), counts))
+    return minimum_viewers <= viewers
 
 
 def chinese_language(value):
