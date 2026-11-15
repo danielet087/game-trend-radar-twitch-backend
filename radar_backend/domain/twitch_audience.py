@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from statistics import median
 
 RULE = "followers_gt_1000_viewers_gte_10_v1"
 MAX_AGE = timedelta(hours=24)
 MIN_FOLLOWERS = 1000
 MIN_VIEWERS = 10
 CHINESE_DISCOVERY_MIN_VIEWERS = 100
+CHINESE_LANGUAGE_SOURCE = "helix_language_filter"
 VIEWER_TIERS = (30, 50, 100)
 
 
@@ -35,6 +37,16 @@ def chinese_language(value):
 def chinese_channels(channels):
     """Use the broadcast language declared to Twitch, never names or location."""
     return [row for row in channels if chinese_language(row.get("language"))]
+
+
+def chinese_metrics(viewer_counts, *, median_fn=median):
+    return {
+        "viewer_count": sum(viewer_counts),
+        "streamer_count": len(viewer_counts),
+        "median_viewer_count": median_fn(viewer_counts) if viewer_counts else None,
+        "largest_stream_viewer_count": max(viewer_counts, default=0),
+        "streamer_counts_above_viewers": streamer_counts_above_viewers(viewer_counts),
+    }
 
 
 def _fresh_record(

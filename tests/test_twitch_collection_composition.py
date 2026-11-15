@@ -129,7 +129,10 @@ class FakeClient:
             return {"data": [], "pagination": {}}
         assert endpoint == "streams"
         if "language" in params:
-            return {"data": [], "pagination": {}}
+            assert "game_id" not in params or params["language"] == ["zh", "zh-hk"]
+            channels = [{"game_id": "1", "user_id": "101", "viewer_count": 9100, "type": "live",
+                         "language": "zh-hk"}] if "game_id" in params else []
+            return {"data": channels, "pagination": {}}
         game_id = params["game_id"]
         channels = [
             {
@@ -234,10 +237,14 @@ def test_collection_job_uses_real_census_audience_tracking_and_writes_only_compl
         assert one["filtered_audience"]["median_viewer_count"] == 9000
         assert one["filtered_audience"]["excluded_low_follower_count"] == 1
         assert one["filtered_audience"]["excluded_low_viewer_count"] == 1
+        assert one["audience_regions"]["zh"]["viewer_count"] == 9100
+        assert one["audience_regions"]["zh"]["filtered_audience"]["median_viewer_count"] == 9100
         outside = payload["tracked_games"][1]
         assert outside["game_id"] == "2" and outside["viewer_count"] == 0
         assert outside["pagination_complete"] is True and outside["observation_status"] == "current"
         assert outside["median_viewer_count"] is None
+        assert outside["audience_regions"]["zh"]["viewer_count"] == 0
+        assert outside["audience_regions"]["zh"]["streamer_count"] == 0
         assert set(payload["tracking_state"]["games"]) == {"1", "2"}
         cached = json.loads(cache.read_text(encoding="utf-8"))
         assert set(cached["followers"]) == {"101", "102"}

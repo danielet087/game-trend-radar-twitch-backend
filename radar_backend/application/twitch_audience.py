@@ -181,6 +181,7 @@ def attach_filtered_audience(
     channels_by_game: dict[str, list[dict]],
     resolver,
     *,
+    regional_channels_by_game: dict[str, list[dict]] | None = None,
     priority,
     filtered_metrics,
     info,
@@ -199,12 +200,19 @@ def attach_filtered_audience(
     try:
         for index, row in enumerate(sorted(candidates, key=priority), 1):
             shared = SharedFollowers()
-            row["filtered_audience"] = filtered_metrics(channels_by_game[row["game_id"]], shared)
-            channels = chinese_channels(channels_by_game[row["game_id"]])
-            regional = row.setdefault("audience_regions", {}).setdefault("zh", {})
-            regional.update(viewer_count=sum(channel["viewer_count"] for channel in channels),
-                            streamer_count=len(channels),
-                            filtered_audience=filtered_metrics(channels, shared))
+            game_id = row["game_id"]
+            global_channels = channels_by_game[game_id]
+            row["filtered_audience"] = filtered_metrics(global_channels, shared)
+            if regional_channels_by_game is None:
+                channels = chinese_channels(global_channels)
+                regional = row.setdefault("audience_regions", {}).setdefault("zh", {})
+                regional.update(viewer_count=sum(channel["viewer_count"] for channel in channels),
+                                streamer_count=len(channels),
+                                filtered_audience=filtered_metrics(channels, shared))
+            elif game_id in regional_channels_by_game:
+                row["audience_regions"]["zh"]["filtered_audience"] = filtered_metrics(
+                    regional_channels_by_game[game_id], shared
+                )
             metrics = row["filtered_audience"]
             info(
                 "Filtered audience %d/%d, game %s: %s, %d qualified channels, %d unknown; %d lookups / %d cache hits",

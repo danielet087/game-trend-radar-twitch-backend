@@ -114,7 +114,7 @@ def test_complete_page_boundary_does_not_skip_a_later_qualifying_category(tmp_pa
     assert len(client.calls) == 6
 
 
-def test_chinese_evening_discovery_publishes_independent_admission_and_audit(tmp_path):
+def test_chinese_evening_discovery_uses_the_formal_regional_collection(tmp_path):
     from radar_backend.adapters.twitch_snapshot import store_snapshot
     from radar_backend.domain.twitch_archive import qualified_archive_sources
     from radar_backend.state.twitch_series import project_series
@@ -127,24 +127,28 @@ def test_chinese_evening_discovery_publishes_independent_admission_and_audit(tmp
         ("streams", page([stream(1, 10, 7000), hk])),
         ("streams", page([stream(2, 20, 160), stream(3, 30, 200), stream(509658, 50, 900)])),
         ("streams", page([hk, {**stream(2, 21, 30), "language": "zh-hk"}])),
-        ("streams", page([stream(1, 10, 7000), stream(1, 12, 15)])),
-        ("streams", page([hk])),
         ("games", page([game(2), game(3)])),
         ("streams", page([
-            stream(2, 20, 150),
-            {**stream(2, 21, 30), "language": "zh-hk"},
-            {**stream(2, 22, 400), "language": "en"},
+            stream(2, 20, 80),
+            {**stream(2, 21, 10), "language": "zh-hk"},
+            {**stream(2, 22, 20), "language": "en"},
         ])),
+        ("streams", page([hk, stream(2, 20, 190)], "more")),
+        ("streams", page([stream(2, 20, 150), {**stream(2, 21, 30), "language": "zh-hk"}])),
     ])
     payload = collect_candidates(
         client_id="test", client_secret="test", client=client, now=evening,
         registry_path=registry(tmp_path, {"2": verified}),
-        include_release_hints=False, include_chinese_discovery=True,
+        include_release_hints=False, include_chinese_discovery=True, include_chinese_collection=True,
     )
     assert [row["game_id"] for row in payload["candidate_games"]] == ["1"]
     assert [row["game_id"] for row in payload["tracked_games"]] == ["2"]
     assert client.calls[2][1]["language"] == "zh"
-    assert client.calls[4][1]["game_id"] == ["1"]
+    assert client.calls[6:8] == [
+        ("streams", {"game_id": ["1", "2"], "language": ["zh", "zh-hk"], "first": 100, "type": "live"}),
+        ("streams", {"game_id": ["1", "2"], "language": ["zh", "zh-hk"], "first": 100, "type": "live", "after": "more"}),
+    ]
+    assert not client.responses
     entry = payload["tracking_state"]["games"]["2"]
     assert entry["enrollment"]["audience_region"] == "zh"
     assert entry["enrollment"]["viewer_count"] == 180
@@ -152,17 +156,42 @@ def test_chinese_evening_discovery_publishes_independent_admission_and_audit(tmp
     report = payload["coverage"]["chinese_discovery"]
     assert report["awaiting_release_evidence"] == ["3"]
     assert report["enrolled_game_ids"] == ["2"]
-    assert report["audit"]["games"][0]["only_language_scan"] == 1
-    assert report["audit"]["games"][0]["only_category_census_by_language"] == {}
+    assert "audit" not in report
+    assert payload["coverage"]["chinese_collection"]["complete_categories"] == 2
     relative = store_snapshot(payload, tmp_path)
     history = json.loads((tmp_path / relative).read_text())
     hourly = history["hours"]["2026-09-28T12:00:00Z"]
     assert hourly["chinese_discovery"] == report
     row = next(row for row in hourly["games"] if row["game_id"] == "2")
+    assert row["viewer_count"] == 110
+    assert row["audience_regions"]["zh"]["viewer_count"] == 180
+    assert row["audience_regions"]["zh"]["measurement_source"] == "helix_language_filter"
     assert row["audience_regions"]["zh"]["largest_stream_viewer_count"] == 150
     project_series(tmp_path)
     series = json.loads((tmp_path / "data/twitch_series/2/2026-09.json").read_text())
     assert series["hours"]["2026-09-28T12:00:00Z"]["audience_regions"]["zh"]["largest_stream_viewer_count"] == 150
+
+
+def test_incomplete_formal_chinese_query_publishes_global_with_missing_regional_data(tmp_path):
+    from radar_backend.adapters.twitch_snapshot import store_snapshot
+
+    client = FakeClient([
+        ("games/top", page([game(1)])),
+        ("streams", page([stream(1, 10, 7010)])),
+        ("streams", page([stream(1, 10, 7020)], "more")),
+    ])
+    payload = collect_candidates(
+        client_id="test", client_secret="test", client=client, now=NOW, max_stream_pages=1,
+        registry_path=registry(tmp_path), include_release_hints=False, include_chinese_collection=True,
+    )
+    row = payload["candidate_games"][0]
+    assert row["viewer_count"] == 7010
+    assert "audience_regions" not in row
+    assert payload["coverage"]["chinese_collection"] == {
+        "requested_categories": 1, "complete_categories": 0,
+        "missing_categories_by_reason": {"page_limit": 1}, "helix_calls_excluding_retries": 1,
+    }
+    assert store_snapshot(payload, tmp_path)
 
 
 def test_confirmed_non_new_skipped_but_unknown_games_and_missing_igdb_are_kept(tmp_path):

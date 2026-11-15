@@ -7,7 +7,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from radar_backend.application.twitch_chinese import (
-    SCAN_ERRORS, audit_censuses, discovery_shortlist, scan_codes, scan_languages,
+    SCAN_ERRORS, collect_chinese_audience, discovery_shortlist, scan_codes, scan_languages,
 )
 from radar_backend.domain.twitch_audience import CHINESE_DISCOVERY_MIN_VIEWERS
 
@@ -130,6 +130,7 @@ def collect_candidates(
     category_page_size: int,
     include_filtered_audience: bool,
     include_chinese_discovery: bool,
+    include_chinese_collection: bool = False,
     followers_cache_path: str | Path,
     followers_max_calls: int | None,
     followers_max_seconds: float | None,
@@ -506,9 +507,6 @@ def collect_candidates(
                 shortlisted_game_ids=shortlist,
                 awaiting_release_evidence=[],
                 census_failures=0,
-                audit=audit_censuses(chinese_reader, channels_by_game, [
-                    code for code, status in language_coverage.items() if status in {"complete", "page_limit"}
-                ]),
             )
             if shortlist:
                 metadata, _ = chinese_reader.get("games", {"id": shortlist})
@@ -554,7 +552,8 @@ def collect_candidates(
                     channels = metrics.pop("_channels", None)
                     measured_count += 1
                     measured_ids.add(game_id)
-                    if metrics["audience_regions"]["zh"]["viewer_count"] < CHINESE_DISCOVERY_MIN_VIEWERS:
+                    if (not include_chinese_collection
+                            and metrics["audience_regions"]["zh"]["viewer_count"] < CHINESE_DISCOVERY_MIN_VIEWERS):
                         continue
                     igdb_predictions[game_id] = prediction
                     chinese_rows[game_id] = {
@@ -570,6 +569,20 @@ def collect_candidates(
             chinese_calls = chinese_reader.calls
             if isinstance(client, client_type):
                 client.collection_deadline = deadline
+    regional_channels, regional_report = None, None
+    regional_calls = 0
+    if include_chinese_collection:
+        regional_reader = page_reader(client, max_api_calls - reader.calls - chinese_calls,
+                                      deadline=deadline, monotonic=monotonic)
+        regional_channels, regional_report = collect_chinese_audience(
+            regional_reader, {**retained_by_id, **candidates_by_id, **chinese_rows}, max_stream_pages,
+            stamp=lambda: timestamp(now or datetime_type.now(timezone_type.utc)),
+        )
+        regional_calls = regional_reader.calls
+        chinese_rows = {
+            game_id: row for game_id, row in chinese_rows.items()
+            if row.get("audience_regions", {}).get("zh", {}).get("viewer_count", 0) >= CHINESE_DISCOVERY_MIN_VIEWERS
+        }
     candidates, excluded = (list(candidates_by_id.values()), list(excluded_by_id.values()))
     measured_rows = {**retained_by_id, **candidates_by_id, **chinese_rows}
     hints_status = (
@@ -620,7 +633,8 @@ def collect_candidates(
             utcnow=(lambda: now) if now else None,
         )
         follower_coverage = attach_filtered_audience(
-            list(measured_rows.values()), channels_by_game, resolver
+            list(measured_rows.values()), channels_by_game, resolver,
+            regional_channels_by_game=regional_channels,
         )
         finished = now or datetime_type.now(timezone_type.utc)
     for row in measured_rows.values():
@@ -699,9 +713,10 @@ def collect_candidates(
             "igdb_categories_unknown": sum(
                 (p["status"] == "unknown" for p in igdb_predictions.values())
             ),
-            "helix_calls_excluding_retries": reader.calls + chinese_calls
+            "helix_calls_excluding_retries": reader.calls + chinese_calls + regional_calls
             + (follower_coverage["follower_lookup_calls"] if follower_coverage else 0),
-            "census_helix_calls_excluding_retries": reader.calls + chinese_calls,
+            "census_helix_calls_excluding_retries": reader.calls + chinese_calls + regional_calls,
+            **({"chinese_collection": regional_report} if regional_report is not None else {}),
             **({"chinese_discovery": chinese_report} if include_chinese_discovery else {}),
             **({"filtered_audience": follower_coverage} if follower_coverage else {}),
             "global_metrics_are_sampled": False,
@@ -714,7 +729,12 @@ def collect_candidates(
                 "rankings and streams can change during pagination; this is not proof of a "
                 "simultaneous, exhaustive global census."
             ),
-            "region_note": "Broadcast language is not broadcaster location; no Taiwan/Asia inference is applied.",
+            "region_note": (
+                "Chinese totals use a separate Helix category and language query. "
+                "The global and Chinese measurements may have different collection times."
+                if include_chinese_collection else
+                "Broadcast language is not broadcaster location; no Taiwan/Asia inference is applied."
+            ),
             "igdb_hints_status": hints_status,
             "tracked_active_count": len(tracked),
             "tracked_outside_discovery_count": sum(

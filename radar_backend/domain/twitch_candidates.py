@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from radar_backend.domain.twitch_audience import chinese_channels, streamer_counts_above_viewers
+from radar_backend.domain.twitch_audience import chinese_channels, chinese_metrics, streamer_counts_above_viewers
 from datetime import datetime
 from typing import Any
 
@@ -83,13 +83,7 @@ def census_metrics(channels, *, counter_type, median_fn):
         "median_viewer_count": median_fn(counts) if counts else None,
         "streamer_counts_above_viewers": streamer_counts_above_viewers(counts),
         "language_streamers": dict(languages.most_common()),
-        "audience_regions": {"zh": {
-            "viewer_count": sum(chinese),
-            "streamer_count": len(chinese),
-            "median_viewer_count": median_fn(chinese) if chinese else None,
-            "largest_stream_viewer_count": max(chinese, default=0),
-            "streamer_counts_above_viewers": streamer_counts_above_viewers(chinese),
-        }},
+        "audience_regions": {"zh": chinese_metrics(chinese, median_fn=median_fn)},
     }
 
 
