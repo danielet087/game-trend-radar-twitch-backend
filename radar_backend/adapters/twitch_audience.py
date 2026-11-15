@@ -106,12 +106,14 @@ def filtered_metrics(channels: list[dict], resolver: FollowerResolver) -> dict:
 
 
 def attach_filtered_audience(
-    candidates: list[dict], channels_by_game: dict[str, list[dict]], resolver: FollowerResolver
+    candidates: list[dict], channels_by_game: dict[str, list[dict]], resolver: FollowerResolver,
+    *, regional_channels_by_game: dict[str, list[dict]] | None = None,
 ) -> dict:
     return _application.attach_filtered_audience(
         candidates,
         channels_by_game,
         resolver,
+        regional_channels_by_game=regional_channels_by_game,
         priority=_rules.priority,
         filtered_metrics=lambda *args: filtered_metrics(*args),
         info=lambda *args: LOGGER.info(*args),

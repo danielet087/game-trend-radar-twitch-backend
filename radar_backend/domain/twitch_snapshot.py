@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from radar_backend.domain.twitch_audience import valid_viewer_tiers
+from radar_backend.domain.twitch_audience import CHINESE_LANGUAGE_SOURCE, valid_viewer_tiers
 
 
 def merge_discovery_state(
@@ -657,11 +657,16 @@ def validate_snapshot(
             chinese = regions.get("zh") if isinstance(regions, dict) else None
             if not isinstance(chinese, dict):
                 raise ValueError("Invalid Chinese audience metrics")
+            source = chinese.get("measurement_source")
+            if source not in (None, CHINESE_LANGUAGE_SOURCE):
+                raise ValueError("Invalid Chinese measurement source")
+            independent = source == CHINESE_LANGUAGE_SOURCE
             regional_viewers, regional_streamers, regional_median = (
                 chinese.get(key) for key in ("viewer_count", "streamer_count", "median_viewer_count")
             )
-            if (type(regional_viewers) is not int or not 0 <= regional_viewers <= viewers
-                    or type(regional_streamers) is not int or not 0 <= regional_streamers <= streamers
+            if (type(regional_viewers) is not int or regional_viewers < 0
+                    or type(regional_streamers) is not int or regional_streamers < 0
+                    or not independent and (regional_viewers > viewers or regional_streamers > streamers)
                     or regional_streamers == 0 and (regional_viewers != 0 or regional_median is not None)
                     or regional_streamers > 0 and (type(regional_median) not in (float, int)
                         or not math_module.isfinite(regional_median)
@@ -675,13 +680,20 @@ def validate_snapshot(
             if "streamer_counts_above_viewers" in chinese:
                 regional_tiers = chinese["streamer_counts_above_viewers"]
                 if (not valid_viewer_tiers(regional_tiers, viewers=regional_viewers, streamers=regional_streamers)
-                        or tiers is not None and not valid_viewer_tiers(
+                        or not independent and tiers is not None and not valid_viewer_tiers(
                             [total - local for total, local in zip(tiers, regional_tiers)],
                             viewers=viewers - regional_viewers, streamers=streamers - regional_streamers)):
                     raise ValueError("Invalid Chinese viewer tiers")
             if "filtered_audience" in chinese:
                 validate_filtered_audience_fn(chinese["filtered_audience"],
                                              viewers=regional_viewers, streamers=regional_streamers)
+            if independent:
+                regional_start = parse_timestamp_fn(chinese.get("measurement_started_at"))
+                regional_finish = parse_timestamp_fn(chinese.get("measurement_finished_at"))
+                started = parse_timestamp_fn(payload.get("collection_started_at"))
+                completed = parse_timestamp_fn(payload["generated_at"])
+                if not started <= regional_start <= regional_finish <= completed:
+                    raise ValueError("Chinese measurement is outside the collection window")
         if schedule is not None:
             started, completed = (
                 parse_timestamp_fn(payload[key])
@@ -700,12 +712,14 @@ def validate_snapshot(
 def history_observation(payload: dict, scheduled: bool, *, observed_rows_fn) -> dict:
     """Project complete observations without dropping optional release evidence."""
     chinese = payload["coverage"].get("chinese_discovery")
+    regional = payload["coverage"].get("chinese_collection")
     return {
         "generated_at": payload["generated_at"],
         "collection_started_at": payload["collection_started_at"],
         "min_viewers": payload["min_viewers"],
         "stop_reason": payload["coverage"]["stop_reason"],
         **({"chinese_discovery": chinese} if chinese and chinese.get("status") != "outside_evening" else {}),
+        **({"chinese_collection": regional} if regional is not None else {}),
         **(
             {"collection_schedule": dict(payload["collection_schedule"])}
             if scheduled

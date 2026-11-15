@@ -21,6 +21,9 @@ def report_collection(payload: dict, args: CollectionRequest, path: Path, *, sum
     chinese = payload["coverage"].get("chinese_discovery")
     if chinese and chinese["status"] != "outside_evening":
         print(f"Chinese evening discovery: {json.dumps(chinese, ensure_ascii=False)}")
+    regional = payload["coverage"].get("chinese_collection")
+    if regional is not None:
+        print(f"Chinese audience collection: {json.dumps(regional, ensure_ascii=False)}")
     steam_summary = payload.get("steam_catalog_summary", {})
     if steam_summary:
         print(f"Steam/Twitch mapping: {json.dumps(steam_summary, ensure_ascii=False)}")
@@ -69,11 +72,15 @@ def report_collection(payload: dict, args: CollectionRequest, path: Path, *, sum
             )
             if chinese and chinese["status"] != "outside_evening":
                 summary.write(
-                    "\n### 中文新作補掃與漏台抽查\n\n"
+                    "\n### 中文新作補掃\n\n"
                     f"- 中文新作門檻 {chinese['min_viewers']} 人\n"
-                    f"- 本輪新增追蹤 {len(chinese.get('enrolled_game_ids', []))} 款\n"
-                    f"- 比對 {len(chinese.get('audit', {}).get('games', []))} 款遊戲\n\n"
-                    "掃描時間有先後，頻道差異供抽查。\n"
+                    f"- 本輪新增追蹤 {len(chinese.get('enrolled_game_ids', []))} 款\n\n"
+                )
+            if regional is not None:
+                summary.write(
+                    "\n### 中文區量測\n\n"
+                    f"- 完整量測 {regional['complete_categories']}／{regional['requested_categories']} 款\n"
+                    f"- Helix 呼叫（不含重試）{regional['helix_calls_excluding_retries']} 次\n\n"
                 )
             if audience:
                 summary.write(
