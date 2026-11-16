@@ -1,5 +1,5 @@
 name: Archive Twitch daily history
-run-name: "Archive Twitch history | keep=${{ inputs.keep_days || 3 }}d | prune=${{ inputs.prune || 'apply' }} | ${{ github.event_name }}"
+run-name: "Archive Twitch history | keep=${{ inputs.keep_days || 3 }}d | prune=${{ inputs.prune || 'apply' }} | slot=${{ inputs.target_slot || 'manual' }} | source=${{ inputs.trigger_source || github.event_name }}"
 
 # Raw day files are the complete hourly record and were most of the published
 # site. Each finished day (older than the newest keep_days Taipei days) is
@@ -7,7 +7,8 @@ run-name: "Archive Twitch history | keep=${{ inputs.keep_days || 3 }}d | prune=$
 # its manifest. Then, through the normal database-first publication, the site
 # drops each archived day whose bytes match the manifest, whose archived copy
 # verifies again and whose closing view exists. The owner approved the daily
-# removal on 2026-11-16.
+# removal on 2026-11-16. The Cloudflare scheduler dispatches it at 03:30 Taipei;
+# GitHub's best-effort cron stays as a fallback.
 on:
   schedule:
     - cron: '23 19 * * *'  # 03:23 Asia/Taipei, after the previous day closes
@@ -24,6 +25,16 @@ on:
         type: choice
         options: [apply, dry-run, skip]
         default: apply
+      target_slot:
+        description: External scheduler slot identifier (leave empty for a manual run)
+        required: false
+        type: string
+        default: ''
+      trigger_source:
+        description: Trigger source for run identification
+        required: false
+        type: string
+        default: manual
 
 permissions:
   contents: read
