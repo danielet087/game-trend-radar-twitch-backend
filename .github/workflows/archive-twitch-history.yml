@@ -1,23 +1,32 @@
 name: Archive Twitch daily history
-run-name: "Archive Twitch history | keep=${{ inputs.keep_days || 3 }}d | ${{ github.event_name }}"
+run-name: "Archive Twitch history | keep=${{ inputs.keep_days || 3 }}d | prune=${{ inputs.prune || 'apply' }} | ${{ github.event_name }}"
 
-# Raw day files are the complete hourly record and most of the published site.
-# Each finished day (older than the newest keep_days Taipei days) is copied to
-# a monthly GitHub Release, verified after upload, and listed in its manifest.
-# This workflow only adds copies; it never deletes site or database data.
+# Raw day files are the complete hourly record and were most of the published
+# site. Each finished day (older than the newest keep_days Taipei days) is
+# first copied to a monthly GitHub Release, verified after upload and listed in
+# its manifest. Then, through the normal database-first publication, the site
+# drops each archived day whose bytes match the manifest, whose archived copy
+# verifies again and whose closing view exists. The owner approved the daily
+# removal on 2026-11-16.
 on:
   schedule:
     - cron: '23 19 * * *'  # 03:23 Asia/Taipei, after the previous day closes
   workflow_dispatch:
     inputs:
       keep_days:
-        description: "Newest Taipei days that stay only on the site"
+        description: "Newest Taipei days that keep their raw file on the site"
         required: false
         type: number
         default: 3
+      prune:
+        description: "Remove archived days from the site"
+        required: false
+        type: choice
+        options: [apply, dry-run, skip]
+        default: apply
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: twitch-history-archive
@@ -28,6 +37,8 @@ jobs:
     if: vars.RADAR_DATABASE_MIGRATION_PAUSE != '1'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,3 +63,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           KEEP_DAYS: ${{ inputs.keep_days || 3 }}
         run: python -m scripts.archive_twitch_history --history frontend/data/twitch_history --keep-days "$KEEP_DAYS"
+
+  prune:
+    needs: archive
+    if: vars.RADAR_DATABASE_MIGRATION_PAUSE != '1' && (inputs.prune || 'apply') != 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Shares the Twitch publication lane with the hourly collector.
+    concurrency:
+      group: twitch-live-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Test archive and removal rules
+        run: python -m pytest -q -p no:cacheprovider tests/test_archive_twitch_history.py tests/test_prune_twitch_history.py tests/test_twitch_history_views.py
+      - name: Remove archived days from the site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_DAYS: ${{ inputs.keep_days || 3 }}
+          MODE: ${{ inputs.prune || 'apply' }}
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
+        run: |
+          args=(--keep-days "$KEEP_DAYS")
+          if [ "$MODE" = "apply" ]; then args+=(--apply); fi
+          python -m scripts.prune_twitch_history "${args[@]}"
