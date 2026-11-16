@@ -1,0 +1,54 @@
+name: Archive Twitch daily history
+run-name: "Archive Twitch history | keep=${{ inputs.keep_days || 3 }}d | ${{ github.event_name }}"
+
+# Raw day files are the complete hourly record and most of the published site.
+# Each finished day (older than the newest keep_days Taipei days) is copied to
+# a monthly GitHub Release, verified after upload, and listed in its manifest.
+# This workflow only adds copies; it never deletes site or database data.
+on:
+  schedule:
+    - cron: '23 19 * * *'  # 03:23 Asia/Taipei, after the previous day closes
+  workflow_dispatch:
+    inputs:
+      keep_days:
+        description: "Newest Taipei days that stay only on the site"
+        required: false
+        type: number
+        default: 3
+
+permissions:
+  contents: write
+
+concurrency:
+  group: twitch-history-archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    if: vars.RADAR_DATABASE_MIGRATION_PAUSE != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read the published day files
+        uses: actions/checkout@v4
+        with:
+          repository: danielet087/game-trend-radar
+          path: frontend
+          persist-credentials: false
+          sparse-checkout: data/twitch_history
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test archive rules
+        run: |
+          python -m pip install --disable-pip-version-check 'pytest>=8,<9'
+          python -m pytest -q -p no:cacheprovider tests/test_archive_twitch_history.py
+      - name: Copy finished days to releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_DAYS: ${{ inputs.keep_days || 3 }}
+        run: python -m scripts.archive_twitch_history --history frontend/data/twitch_history --keep-days "$KEEP_DAYS"
