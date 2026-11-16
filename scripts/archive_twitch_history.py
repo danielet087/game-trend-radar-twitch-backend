@@ -6,7 +6,9 @@ the newest KEEP_DAYS Taipei days is uploaded here first: one release per month
 (tag twitch-history-YYYY-MM), one gzip asset per day, and a manifest with the
 SHA-256 of the original JSON bytes. A changed day file is uploaded again. Every
 uploaded asset is downloaded back and checked before the manifest records it,
-so the manifest only lists days that can be restored byte for byte.
+so the manifest only lists days that can be restored byte for byte. An archived
+day is replaced only by a file that keeps every archived hour, so a day file
+recreated with fewer hours can never shrink its archived copy.
 """
 from __future__ import annotations
 
@@ -89,8 +91,16 @@ def _manifest(raw: bytes | None, tag: str) -> dict:
     return value
 
 
+def _keeps_hours(releases, tag, held, raw, directory) -> bool:
+    directory.mkdir(exist_ok=True)
+    archived = releases.download(tag, held["asset"], directory)
+    if archived is None:
+        return True  # Nothing restorable is held; the new copy can only help.
+    return set(json.loads(gzip.decompress(archived))["hours"]) <= set(json.loads(raw)["hours"])
+
+
 def archive(history: Path, releases, *, keep_days: int = KEEP_DAYS) -> dict:
-    report = {"archived": [], "unchanged": [], "kept_on_site": 0}
+    report = {"archived": [], "unchanged": [], "conflicts": [], "kept_on_site": 0}
     days = finished_days(history, keep_days)
     report["kept_on_site"] = len([p for p in history.glob("*.json") if DAY.fullmatch(p.stem)]) - len(days)
     months: dict[str, list[str]] = {}
@@ -108,8 +118,12 @@ def archive(history: Path, releases, *, keep_days: int = KEEP_DAYS) -> dict:
             for day in month_days:
                 raw = (history / f"{day}.json").read_bytes()
                 digest = sha256(raw)
-                if manifest["days"].get(day, {}).get("json_sha256") == digest:
+                held = manifest["days"].get(day)
+                if held and held.get("json_sha256") == digest:
                     report["unchanged"].append(day)
+                    continue
+                if held and not _keeps_hours(releases, tag, held, raw, work / tag / "held"):
+                    report["conflicts"].append(day)
                     continue
                 packed = compress(raw)
                 asset = work / tag / f"{day}.json.gz"
@@ -144,6 +158,9 @@ def main(argv=None) -> int:
     report = archive(args.history, Releases(args.repository), keep_days=args.keep_days)
     summary = (f"Archived {len(report['archived'])} day(s), {len(report['unchanged'])} already archived, "
                f"{report['kept_on_site']} newest day(s) not archived yet.")
+    if report["conflicts"]:
+        summary += f" Kept the archived copy of {', '.join(report['conflicts'])}: the site file lost hours."
+        print("::warning::" + summary)
     print(summary)
     print(json.dumps(report, ensure_ascii=False))
     if os.environ.get("GITHUB_STEP_SUMMARY"):

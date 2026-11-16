@@ -71,3 +71,16 @@ def test_an_upload_that_does_not_verify_stops_before_the_manifest(tmp_path):
     with pytest.raises(RuntimeError):
         archive(history, releases, keep_days=3)
     assert MANIFEST not in releases.assets["twitch-history-2026-11"]
+
+
+def test_a_recreated_day_with_fewer_hours_never_replaces_its_archive(tmp_path):
+    history = write_days(tmp_path, ["2026-11-02", "2026-11-03", "2026-11-04"])
+    full = {"schema_version": 1, "date": "2026-11-01", "hours": {"a": 1, "b": 2}}
+    (history / "2026-11-01.json").write_text(json.dumps(full))
+    releases = MemoryReleases()
+    archive(history, releases, keep_days=3)
+    kept = releases.assets["twitch-history-2026-11"]["2026-11-01.json.gz"]
+    (history / "2026-11-01.json").write_text(json.dumps({**full, "hours": {"a": 1}}))
+    report = archive(history, releases, keep_days=3)
+    assert report["conflicts"] == ["2026-11-01"] and report["archived"] == []
+    assert releases.assets["twitch-history-2026-11"]["2026-11-01.json.gz"] == kept
