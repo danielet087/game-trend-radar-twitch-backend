@@ -251,7 +251,7 @@ export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetc
   return { ...base, action: "dispatch", reason: "missing_published_collection", attempts: attemptCount + 1 };
 }
 
-// New jobs are opt-in through RADAR_ENABLED_JOBS; production enables all seven.
+// New jobs are opt-in through RADAR_ENABLED_JOBS; production enables all ten.
 // An absent or empty list retains the Twitch-only monitor for rollback.
 // Destinations cannot be configured by callers or redirected by an API response.
 export const SCHEDULE_JOBS = Object.freeze([
@@ -279,6 +279,16 @@ export const SCHEDULE_JOBS = Object.freeze([
   { id: "nintendo_daily", repo: "game-trend-radar-twitch-backend", workflow: "collect-nintendo.yml", enabled: false,
     minute: 30, taipeiHours: [8] },
   { id: "frontend_insights", repo: "game-trend-radar", workflow: "radar-insights.yml", enabled: false, minute: 17 },
+  // Maintenance runs. GitHub's own cron for them is best-effort (the hourly
+  // storage sync fires every four to six hours), so they are dispatched here.
+  // The watchdog only reads GitHub and updates one alert issue.
+  { id: "frontend_watchdog", repo: "game-trend-radar", workflow: "radar-watchdog.yml", enabled: false, minute: 17 },
+  // Releases unreferenced evidence pins older than three days, at most 200.
+  { id: "storage_retention", repo: "game-trend-radar-backend", workflow: "storage-evidence-retention.yml", enabled: false,
+    minute: 30, taipeiHours: [4] },
+  // Archives finished Twitch days to releases, then drops verified ones from the site.
+  { id: "twitch_archive", repo: "game-trend-radar-twitch-backend", workflow: "archive-twitch-history.yml", enabled: false,
+    minute: 30, taipeiHours: [3] },
 ].map((job) => Object.freeze({ ...job,
   ...(job.taipeiHours ? { taipeiHours: Object.freeze(job.taipeiHours) } : {}),
   ...(job.blockingWorkflows ? { blockingWorkflows: Object.freeze(job.blockingWorkflows) } : {}),
@@ -475,7 +485,7 @@ export async function checkScheduledJobs(env, {
   // working Twitch monitor. Every network request retains timeout/redirect rules.
   const checkDue = async ({ job_id, target_slot }) => {
     if (!enabled.has(job_id)) return { job_id, target_slot, action: "skip", reason: "job_staged" };
-    const hourly = ["twitch", "steam_catchup", "frontend_insights"].includes(job_id);
+    const hourly = ["twitch", "steam_catchup", "frontend_insights", "frontend_watchdog"].includes(job_id);
     if (hourly ? hourSlot(epoch) !== hourSlot(scheduledEpoch) : taipeiDay(epoch) !== taipeiDay(scheduledEpoch)) {
       return { job_id, target_slot, action: "skip", reason: "stale_cron_delivery" };
     }

@@ -72,6 +72,9 @@ test("Taiwan midnight, year boundaries and daily times produce exact UTC minute 
     ["2027-01-01T08:30:00+08:00", "nintendo_daily", "2027-01-01T00:30:00Z"],
     ["2026-10-03T12:17:00+08:00", "frontend_insights", "2026-10-03T04:17:00Z"],
     ["2026-10-03T12:05:00+08:00", "twitch", "2026-10-03T04:00:00Z"],
+    ["2026-10-03T12:17:00+08:00", "frontend_watchdog", "2026-10-03T04:17:00Z"],
+    ["2026-10-03T04:30:00+08:00", "storage_retention", "2026-10-02T20:30:00Z"],
+    ["2026-10-03T03:30:00+08:00", "twitch_archive", "2026-10-02T19:30:00Z"],
   ]) assert.deepEqual(scheduledJobs(when).filter((item) => item.job_id === id), [{ job_id: id, target_slot: slot }]);
   assert.throws(() => scheduledJobs("invalid"), /invalid_clock/);
 });
@@ -243,6 +246,9 @@ test("each enabled job sends only its fixed destination and exact due slot input
     ["2026-10-05T01:30:00+08:00", "steam_descriptions"],
     ["2026-10-05T08:30:00+08:00", "nintendo_daily"],
     ["2026-10-05T12:17:00+08:00", "frontend_insights"],
+    ["2026-10-05T12:17:00+08:00", "frontend_watchdog"],
+    ["2026-10-05T04:30:00+08:00", "storage_retention"],
+    ["2026-10-05T03:30:00+08:00", "twitch_archive"],
   ]) {
     const api = fixture();
     assert.equal((await check(api, when, onlyJob(id))).find((item) => item.job_id === id).action, "dispatch");
@@ -574,4 +580,16 @@ test("growth retries do not replace pending catchups or duplicate their own acti
   } });
   assert.equal((await check(own, "2026-11-25T07:15:00+08:00"))[0].blocking_workflow, "steam-public-growth.yml");
   assert.equal(own.posts().length, 0);
+});
+
+test("maintenance jobs run once at their own slot and never on the shared 30-minute content slots", () => {
+  for (let hour = 0; hour < 24; hour += 1) {
+    const at = (minute) => scheduledJobs(`2026-10-03T${String(hour).padStart(2, "0")}:${minute}:00+08:00`).map((item) => item.job_id);
+    assert.ok(at("17").includes("frontend_watchdog"));
+    assert.equal(at("30").includes("storage_retention"), hour === 4);
+    assert.equal(at("30").includes("twitch_archive"), hour === 3);
+    for (const minute of ["00", "05", "15"]) {
+      assert.ok(!at(minute).some((id) => ["frontend_watchdog", "storage_retention", "twitch_archive"].includes(id)));
+    }
+  }
 });
