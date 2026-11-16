@@ -11,13 +11,14 @@ from radar_core.publication import (
 )
 from radar_backend.state.json_snapshot import write_json
 from radar_backend.state.twitch_series import SERIES_PATH, project_series
+from radar_backend.state.twitch_history_views import VIEW_PATHS, project_history_views
 from radar_backend.adapters.twitch_snapshot import (
     DISCOVERY_PATH, MAPPING_PATH, STATUS_PATH, TRACKING_PATH,
     observation_order, parse_timestamp, store_snapshot, timestamp, validate_snapshot,
 )
 
 PUBLICATION_PATHS = (
-    "data/twitch_live.json", "data/twitch_history/", SERIES_PATH,
+    "data/twitch_live.json", "data/twitch_history/", SERIES_PATH, *VIEW_PATHS,
     STATUS_PATH, TRACKING_PATH, MAPPING_PATH, DISCOVERY_PATH,
 )
 
@@ -110,6 +111,7 @@ def merge_frozen_snapshot(
             raise ValueError("Conflicting Twitch census for the same observation time")
     day_path = store_snapshot(deepcopy(payload), frontend)
     project_series(frontend, day_path)
+    project_history_views(frontend, day_path)
     if "collection_schedule" not in payload:
         return
     status_path = frontend / STATUS_PATH

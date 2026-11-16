@@ -148,6 +148,8 @@ Helix 的直播語言不等於主播所在地。目前提供 `language_streamers
 | `data/twitch_tracking.json` | 持續追蹤狀態、首次收錄依據與最後觀測；退出後仍保留紀錄 |
 | `data/twitch_steam_mapping.json` | Steam／IGDB／Twitch ID 對照、Steam 補充資訊與待配對狀態 |
 | `data/twitch_history/YYYY-MM-DD.json` | 以台灣日期分檔、以 UTC 小時為索引的人數歷史 |
+| `data/twitch_history_compact/YYYY-MM-DD.json` | 同一份歷史只留 24 小時圖表讀取的欄位（約原檔 1/10），只保留最新 3 個台灣日期 |
+| `data/twitch_history_close/YYYY-MM-DD.json` | 當天最後一個有效小時的完整快照，供開台選題重播過去日期 |
 | `data/twitch_collection_status.json` | 與 latest/history 同 commit 發布的小型成功紀錄，供外部監控及防重複檢查 |
 
 新版 workflow 輸出 `collection_schedule`：`target_slot` 為要求收集的 UTC 小時，另保存 `trigger_source`、GitHub `run_id` 與 `run_attempt`。歷史小時與 `observed_slot` 採**實際開始收集時間**；`generated_at`／receipt 的 `completed_at` 是完成時間，每個遊戲仍保留自己的分頁量測起訖。跨小時完成不代表下一小時的觀察，延遲也不會偽裝成過去的量測。既有未帶此 metadata 的舊歷史保持原樣，不自動改寫日期或倒填缺口。
@@ -160,7 +162,7 @@ Helix 的直播語言不等於主播所在地。目前提供 `language_streamers
 
 新歷史另外保存當次 `filtered_audience`（規則、樣本台數、完整性與中位數）。舊歷史沒有頻道層級資料，無法回頭套用新門檻；舊中位數不會補成新指標。查詢未補齊的時段保留 `partial` 與 `null`，不以較晚的追隨數重算或倒填。
 
-**歷史持續累積，不設 24 小時或 30 天刪除期限。** 每個台灣日期各有一份歷史檔，更新當天時不刪除前一天、前一月或更早的檔案。每個小時保留最新一次成功快照，包括當時的候選、官方驗證狀態與兩種日期推算；新進榜及之後不再入列的遊戲，其已保存紀錄均保留。收集失敗的時段保持缺測，不複製上一筆也不補零。前端實驗頁目前查看最近 24 小時，並不代表只保存 24 小時。
+**歷史持續累積，不設 24 小時或 30 天刪除期限。** 兩種小檔由原始每日檔衍生、與原始檔同一個 commit 發布，原始檔仍是唯一依據；舊日期的小檔可隨時從原始檔重建（`project-twitch-series.yml` 會一併補齊）。 每個台灣日期各有一份歷史檔，更新當天時不刪除前一天、前一月或更早的檔案。每個小時保留最新一次成功快照，包括當時的候選、官方驗證狀態與兩種日期推算；新進榜及之後不再入列的遊戲，其已保存紀錄均保留。收集失敗的時段保持缺測，不複製上一筆也不補零。前端實驗頁目前查看最近 24 小時，並不代表只保存 24 小時。
 
 Workflow artifact 的 `retention-days: 2` 僅是尚待發布結果的短期備份；已提交到前端 Git Repository 的每日歷史不受該期限影響。現有舊版取樣不會補寫為 schema v2 的完整量測，中位數與新作判斷從新版成功收集後開始累積。
 

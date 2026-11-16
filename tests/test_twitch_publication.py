@@ -70,6 +70,7 @@ def test_one_acknowledged_commit_contains_census_history_state_and_bound_receipt
     changed = set(git("--git-dir", remote, "diff-tree", "--no-commit-id", "--name-only", "-r", "main").splitlines())
     assert changed == {
         "data/twitch_live.json", "data/twitch_history/2026-09-29.json",
+        "data/twitch_history_compact/2026-09-29.json", "data/twitch_history_close/2026-09-29.json",
         "data/twitch_collection_status.json", "data/twitch_tracking.json",
         "data/twitch_steam_mapping.json", "data/twitch_steam_discovery.json",
         "data/twitch_series/index.json", "data/twitch_series/1/2026-09.json",

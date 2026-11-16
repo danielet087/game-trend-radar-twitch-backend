@@ -11,6 +11,7 @@ from radar_core.publication import SubprocessGitRepository, publish_with_retry, 
 from radar_backend.jobs.publish_twitch import FRONTEND_URL, ROOT
 from radar_backend.adapters.twitch_http import TwitchClient
 from radar_backend.state.twitch_series import SERIES_PATH, project_series, cover_url, _write
+from radar_backend.state.twitch_history_views import VIEW_PATHS, project_history_views
 
 
 def restore_covers(frontend, lookup):
@@ -42,6 +43,7 @@ def main():
 
     def project(frontend):
         project_series(frontend)
+        project_history_views(frontend)
         if client:
             restored = restore_covers(frontend, client.get_games_by_ids)
             print(f"Restored {restored} missing Twitch category covers.")
@@ -52,7 +54,7 @@ def main():
             subprocess.run(["git", "-C", str(frontend), "config", key, value], check=True)
         repository = SubprocessGitRepository(frontend, disposable_checkout=True, environment=os.environ,
             push_command_prefix=("bash", str(ROOT / "scripts/git_frontend_auth.sh")))
-        receipt = publish_with_retry(repository, project, paths=(SERIES_PATH,),
+        receipt = publish_with_retry(repository, project, paths=(SERIES_PATH, *VIEW_PATHS),
             message="data: project compact Twitch game history", input_revision=revision,
             payload_revision=revision)
         print(f"Published Twitch history at frontend {receipt.published_revision}.")
