@@ -251,7 +251,7 @@ export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetc
   return { ...base, action: "dispatch", reason: "missing_published_collection", attempts: attemptCount + 1 };
 }
 
-// New jobs are opt-in through RADAR_ENABLED_JOBS; production enables all ten.
+// New jobs are opt-in through RADAR_ENABLED_JOBS; production enables all fourteen.
 // An absent or empty list retains the Twitch-only monitor for rollback.
 // Destinations cannot be configured by callers or redirected by an API response.
 export const SCHEDULE_JOBS = Object.freeze([
@@ -281,14 +281,26 @@ export const SCHEDULE_JOBS = Object.freeze([
   { id: "frontend_insights", repo: "game-trend-radar", workflow: "radar-insights.yml", enabled: false, minute: 17 },
   // Maintenance runs. GitHub's own cron for them is best-effort (the hourly
   // storage sync fires every four to six hours), so they are dispatched here.
-  // The watchdog only reads GitHub and updates one alert issue.
-  { id: "frontend_watchdog", repo: "game-trend-radar", workflow: "radar-watchdog.yml", enabled: false, minute: 17 },
+  // The watchdog reads GitHub and updates one alert issue. It also receives this
+  // Worker's own token expiry date, the one credential no workflow can see.
+  { id: "frontend_watchdog", repo: "game-trend-radar", workflow: "radar-watchdog.yml", enabled: false, minute: 17,
+    reportsSchedulerToken: true },
   // Releases unreferenced evidence pins older than three days, at most 200.
   { id: "storage_retention", repo: "game-trend-radar-backend", workflow: "storage-evidence-retention.yml", enabled: false,
     minute: 30, taipeiHours: [4] },
   // Archives finished Twitch days to releases, then drops verified ones from the site.
   { id: "twitch_archive", repo: "game-trend-radar-twitch-backend", workflow: "archive-twitch-history.yml", enabled: false,
     minute: 30, taipeiHours: [3] },
+  // Each repository records its credentials' expiry dates (never their values)
+  // for the watchdog's 14-day warning.
+  { id: "credentials_frontend", repo: "game-trend-radar", workflow: "credential-expiry.yml", enabled: false,
+    minute: 30, taipeiHours: [5] },
+  { id: "credentials_backend", repo: "game-trend-radar-backend", workflow: "credential-expiry.yml", enabled: false,
+    minute: 30, taipeiHours: [5] },
+  { id: "credentials_twitch", repo: "game-trend-radar-twitch-backend", workflow: "credential-expiry.yml", enabled: false,
+    minute: 30, taipeiHours: [5] },
+  { id: "credentials_content", repo: "game-trend-radar-content-backend", workflow: "credential-expiry.yml", enabled: false,
+    minute: 30, taipeiHours: [5] },
 ].map((job) => Object.freeze({ ...job,
   ...(job.taipeiHours ? { taipeiHours: Object.freeze(job.taipeiHours) } : {}),
   ...(job.blockingWorkflows ? { blockingWorkflows: Object.freeze(job.blockingWorkflows) } : {}),
@@ -395,6 +407,34 @@ async function validatedDailySuccess(job, runs, settings, slot, fetchImpl, now) 
   return null;
 }
 
+// GitHub reports a personal access token's expiry on every API response as
+// "2026-12-01 00:00:00 UTC" or with a numeric offset; no header means none.
+export function tokenExpiryTimestamp(value) {
+  const match = /^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d:\d\d)(?:\.\d+)?\s*(UTC|Z|[+-]\d\d:?\d\d)?$/.exec(String(value ?? "").trim());
+  if (!match) return null;
+  let zone = match[3] || "Z";
+  if (zone === "UTC") zone = "Z";
+  else if (zone !== "Z" && !zone.includes(":")) zone = `${zone.slice(0, 3)}:${zone.slice(3)}`;
+  const epoch = Date.parse(`${match[1]}T${match[2]}${zone}`);
+  return Number.isFinite(epoch) ? new Date(epoch).toISOString().replace(".000Z", "Z") : null;
+}
+
+// Only this date, "none" or "unknown" leaves the Worker; never the token. A
+// failed lookup must not stop the watchdog dispatch it accompanies.
+async function schedulerTokenExpiry(fetchImpl, settings) {
+  let response;
+  try {
+    // rate_limit does not count against the token's API quota.
+    response = await request(fetchImpl, `${API_ROOT}/rate_limit`, apiOptions(settings.token), "github_rate_limit");
+  } catch {
+    return "unknown";
+  }
+  const header = response.headers.get("github-authentication-token-expiration");
+  try { await response.body?.cancel(); } catch { /* nothing to release */ }
+  if (header === null || !header.trim()) return "none";
+  return tokenExpiryTimestamp(header) ?? "unknown";
+}
+
 // These maps close duplicate delivery races within one Worker isolate only.
 // Durable protection remains the workflow's concurrency-held slot guard.
 const inflightJobs = new Set();
@@ -444,6 +484,8 @@ async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
         run_id: (success || matching[0]).id };
     }
     const options = apiOptions(jobSettings.token);
+    const reported = job.reportsSchedulerToken
+      ? { scheduler_token_expires_at: await schedulerTokenExpiry(fetchImpl, jobSettings) } : {};
     // Mark before POST: a timeout can mean GitHub accepted the dispatch but its
     // response was lost. Do not blindly repeat a daily progress reset.
     attemptedSlots.set(key, now);
@@ -452,7 +494,7 @@ async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
         ...options,
         method: "POST",
         headers: { ...options.headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ ref: "main", inputs: { ...job.inputs, target_slot: slot, trigger_source: "cloudflare" } }),
+        body: JSON.stringify({ ref: "main", inputs: { ...job.inputs, ...reported, target_slot: slot, trigger_source: "cloudflare" } }),
       }, "github_dispatch");
     return { ...base, action: "dispatch", reason: "scheduled_slot_due" };
   } finally {
