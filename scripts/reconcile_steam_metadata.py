@@ -20,6 +20,7 @@ from radar_backend.state.validation import (
     validate_persisted_discovery, validate_persisted_mapping, validate_persisted_tracking,
 )
 from radar_backend.adapters.twitch_snapshot import validate_snapshot
+from radar_backend.state.json_snapshot import render_json
 
 ROW_LISTS = ("candidate_games", "tracked_games", "top_games", "excluded_games")
 ROW_METADATA = {"steam_matches", "tracking"}
@@ -172,7 +173,7 @@ def reconcile_frontend(frontend: Path, now: datetime, *, steam_catalog: Path | N
     documents = {"snapshot": latest, "tracking": registry, "mapping": mappings}
     # Pre-serialize every output and check the local inputs have not changed
     # during reconciliation. The caller must retry using a fresh local revision.
-    rendered = {key: (json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    rendered = {key: render_json(document, paths[key], allow_nan=False).encode("utf-8")
                 for key, document in documents.items()}
     if any(path.read_bytes() != originals[key] for key, path in paths.items()):
         raise ValueError("Frontend inputs changed during metadata reconciliation")
