@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { checkScheduledJobs, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS } from "../src/worker.mjs";
+import worker, { checkScheduledJobs, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS, tokenExpiryTimestamp } from "../src/worker.mjs";
 
 const ENV = { GITHUB_ACTIONS_TOKEN: "offline-fixture-only",
   RADAR_ENABLED_JOBS: "steam_daily,steam_catchup,steam_growth,steam_content,steam_descriptions,frontend_insights,nintendo_daily" };
-const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
+const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(value), { status, headers });
 const epoch = (value) => Date.parse(value);
 const iso = (value) => new Date(epoch(value)).toISOString().replace(".000Z", "Z");
 
@@ -13,7 +13,7 @@ function run(slot, overrides = {}) {
     display_title: `Scheduled task | slot=${slot} | cloudflare`, created_at: slot, updated_at: slot, ...overrides };
 }
 
-function fixture({ runs = [], active = {}, activeWorkflows = {}, jobs = [], blockedRepo, dispatchError, responder } = {}) {
+function fixture({ runs = [], active = {}, activeWorkflows = {}, jobs = [], blockedRepo, dispatchError, responder, tokenExpiration } = {}) {
   const requests = [];
   const fetchImpl = async (input, options = {}) => {
     const url = new URL(input);
@@ -30,6 +30,11 @@ function fixture({ runs = [], active = {}, activeWorkflows = {}, jobs = [], bloc
     }
     assert.equal(url.hostname, "api.github.com");
     assert.equal(options.headers.Authorization, "Bearer offline-fixture-only");
+    if (url.pathname === "/rate_limit") {
+      assert.equal(options.method, undefined);
+      if (tokenExpiration === "error") return new Response("never log this body", { status: 503 });
+      return json({ resources: {} }, 200, tokenExpiration ? { "GitHub-Authentication-Token-Expiration": tokenExpiration } : {});
+    }
     assert.ok(SCHEDULE_JOBS.some((job) => url.pathname.startsWith(`/repos/danielet087/${job.repo}/actions/workflows/`)) ||
       /^\/repos\/danielet087\/game-trend-radar-backend\/actions\/runs\/\d+\/jobs$/.test(url.pathname));
     if (blockedRepo && url.pathname.includes(`/repos/danielet087/${blockedRepo}/`)) return new Response("never log this body", { status: 403 });
@@ -249,6 +254,10 @@ test("each enabled job sends only its fixed destination and exact due slot input
     ["2026-10-05T12:17:00+08:00", "frontend_watchdog"],
     ["2026-10-05T04:30:00+08:00", "storage_retention"],
     ["2026-10-05T03:30:00+08:00", "twitch_archive"],
+    ["2026-10-05T05:30:00+08:00", "credentials_frontend"],
+    ["2026-10-05T05:30:00+08:00", "credentials_backend"],
+    ["2026-10-05T05:30:00+08:00", "credentials_twitch"],
+    ["2026-10-05T05:30:00+08:00", "credentials_content"],
   ]) {
     const api = fixture();
     assert.equal((await check(api, when, onlyJob(id))).find((item) => item.job_id === id).action, "dispatch");
@@ -256,9 +265,32 @@ test("each enabled job sends only its fixed destination and exact due slot input
     assert.equal(api.posts().length, 1);
     assert.equal(api.posts()[0].url.pathname, `/repos/danielet087/${job.repo}/actions/workflows/${job.workflow}/dispatches`);
     assert.deepEqual(JSON.parse(api.posts()[0].options.body), { ref: "main", inputs: {
-      ...(id === "steam_daily" ? { refresh_today: "true" } : {}), target_slot: iso(when), trigger_source: "cloudflare",
+      ...(id === "steam_daily" ? { refresh_today: "true" } : {}),
+      ...(id === "frontend_watchdog" ? { scheduler_token_expires_at: "none" } : {}),
+      target_slot: iso(when), trigger_source: "cloudflare",
     } });
+    // Only the watchdog dispatch looks up the scheduler's own token.
+    assert.equal(api.requests.some(({ url }) => url.pathname === "/rate_limit"), id === "frontend_watchdog");
   }
+});
+
+test("the watchdog dispatch carries only the scheduler token's expiry date", async () => {
+  for (const [index, [header, expected]] of [
+    ["2026-12-01 00:00:00 UTC", "2026-12-01T00:00:00Z"],
+    ["2026-12-01 08:00:00 +0800", "2026-12-01T00:00:00Z"],
+    [undefined, "none"],
+    ["error", "unknown"],
+    ["sometime next year", "unknown"],
+  ].entries()) {
+    const api = fixture({ tokenExpiration: header });
+    const results = await check(api, `2026-10-2${index}T12:17:00+08:00`, onlyJob("frontend_watchdog"));
+    assert.equal(results.find((item) => item.job_id === "frontend_watchdog").action, "dispatch");
+    const body = api.posts()[0].options.body;
+    assert.equal(JSON.parse(body).inputs.scheduler_token_expires_at, expected);
+    assert.ok(!body.includes("offline-fixture-only") && !body.includes("never log this body"));
+  }
+  assert.equal(tokenExpiryTimestamp("2026-11-30 17:00:00 -07:00"), "2026-12-01T00:00:00Z");
+  assert.equal(tokenExpiryTimestamp(null), null);
 });
 
 test("a matching successful slot skips and all other completed conclusions also consume the slot", async () => {
@@ -588,8 +620,10 @@ test("maintenance jobs run once at their own slot and never on the shared 30-min
     assert.ok(at("17").includes("frontend_watchdog"));
     assert.equal(at("30").includes("storage_retention"), hour === 4);
     assert.equal(at("30").includes("twitch_archive"), hour === 3);
+    const credentials = ["credentials_frontend", "credentials_backend", "credentials_twitch", "credentials_content"];
+    assert.equal(credentials.filter((id) => at("30").includes(id)).length, hour === 5 ? 4 : 0);
     for (const minute of ["00", "05", "15"]) {
-      assert.ok(!at(minute).some((id) => ["frontend_watchdog", "storage_retention", "twitch_archive"].includes(id)));
+      assert.ok(!at(minute).some((id) => ["frontend_watchdog", "storage_retention", "twitch_archive", ...credentials].includes(id)));
     }
   }
 });
