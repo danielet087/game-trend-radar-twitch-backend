@@ -17,6 +17,16 @@ from radar_backend.domain.twitch_archive import qualified_archive_sources
 
 TAIPEI = timezone(timedelta(hours=8))
 SERIES_PATH = "data/twitch_series/"
+# The stream-planning page reads only these hour fields (frontend
+# src/features/twitch/stream-heat-model.js, through seriesRows and forRegion).
+# Each month gets a heat file beside it with just those fields, about a fifth
+# of the month's bytes; the page falls back to the month when the file is
+# missing. Change HEAT_PROJECTION together with the frontend's check whenever
+# the field list changes.
+HEAT_PROJECTION = "stream_heat_v1"
+HEAT_SUFFIX = "-heat.json"
+HEAT_FIELDS = ("generated_at", "viewer_count", "streamer_count")
+HEAT_REGION_FIELDS = ("viewer_count", "streamer_count", "largest_stream_viewer_count", "measurement_source")
 
 
 def _time(value):
@@ -34,6 +44,20 @@ def _write(path, value):
     if not path.exists() or path.read_text(encoding="utf-8") != raw:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(raw, encoding="utf-8")
+
+
+def heat_projection(chunk):
+    """The month's hours with only the fields the stream-planning heat model reads."""
+    hours = {}
+    for hour, row in chunk["hours"].items():
+        slim = {name: row[name] for name in HEAT_FIELDS if name in row}
+        regions = row.get("audience_regions")
+        chinese = regions.get("zh") if isinstance(regions, dict) else None
+        if isinstance(chinese, dict):
+            slim["audience_regions"] = {"zh": {name: chinese[name] for name in HEAT_REGION_FIELDS if name in chinese}}
+        hours[hour] = slim
+    return {"schema_version": chunk["schema_version"], "timezone": chunk["timezone"], "game_id": chunk["game_id"],
+            "month": chunk["month"], "projection": HEAT_PROJECTION, "hours": hours}
 
 
 def cover_url(value):
@@ -130,6 +154,9 @@ def _archive_metadata(frontend, root, index):
         samples = {}
         for month in game["months"]:
             chunk = json.loads((root / game_id / f"{month}.json").read_text())
+            # Every archived month keeps its heat file in step; this also
+            # backfills months projected before heat files existed.
+            _write(root / game_id / f"{month}{HEAT_SUFFIX}", heat_projection(chunk))
             samples.update({hour: row for hour, row in chunk["hours"].items()
                             if row.get("generated_at") == index["months"].get(month, {}).get(hour)})
         viewers = [row.get("viewer_count") for row in samples.values()]
