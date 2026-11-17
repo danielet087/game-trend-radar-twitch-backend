@@ -331,15 +331,28 @@ test("growth and catchup respect their shared concurrency peers and daily discov
     ["2026-10-08T01:15:00+08:00", "steam-official-daily-catchup-250.yml"],
     ["2026-10-08T03:00:00+08:00", "steam-public-growth.yml"],
     ["2026-10-08T03:00:00+08:00", "steam-two-phase.yml"],
-    ["2026-10-08T03:00:00+08:00", "steam-official-backlog-oneoff-20260923.yml"],
-    ["2026-10-08T01:15:00+08:00", "steam-official-nearfirst-batch-once.yml"],
-    ["2026-10-08T03:00:00+08:00", "steam-official-hour-stress-once.yml"],
   ]) {
     const api = fixture({ activeWorkflows: { [blocker]: { queued: [run(iso(when), { status: "queued" })] } } });
     const [result] = await check(api, when);
     assert.equal(result.reason, "workflow_active");
     assert.equal(result.blocking_workflow, blocker);
     assert.equal(api.posts().length, 0);
+  }
+});
+
+test("retired one-off experiments are no longer read before Steam dispatches", async () => {
+  // These workflows are disabled; the scheduler must not depend on them existing.
+  const retired = ["steam-official-backlog-oneoff-20260923.yml", "steam-official-nearfirst-batch-once.yml",
+    "steam-official-hour-stress-once.yml"];
+  for (const job of SCHEDULE_JOBS) {
+    assert.ok(!(job.blockingWorkflows || []).some((workflow) => retired.includes(workflow)), job.id);
+  }
+  for (const when of ["2026-10-08T03:00:00+08:00", "2026-10-08T01:15:00+08:00"]) {
+    const api = fixture({ activeWorkflows: Object.fromEntries(retired.map((workflow) =>
+      [workflow, { in_progress: [run(iso(when), { status: "in_progress" })] }])) });
+    const [result] = await check(api, when);
+    assert.equal(result.action, "dispatch");
+    assert.equal(api.posts().length, 1);
   }
 });
 
@@ -569,9 +582,7 @@ test("a six-hour candidate retry takes priority over the simultaneous hourly cat
 });
 
 test("a candidate retry waits for an official collector still running from an earlier hour", async () => {
-  for (const [index, blocker] of ["steam-official-daily-catchup-250.yml", "steam-public-growth.yml",
-    "steam-official-backlog-oneoff-20260923.yml", "steam-official-nearfirst-batch-once.yml",
-    "steam-official-hour-stress-once.yml"].entries()) {
+  for (const [index, blocker] of ["steam-official-daily-catchup-250.yml", "steam-public-growth.yml"].entries()) {
     const date = `2026-11-${12 + index}`;
     const api = fixture({ activeWorkflows: { [blocker]: { in_progress: [run(iso(`${date}T05:00:00+08:00`), { status: "in_progress" })] } } });
     const results = await check(api, `${date}T06:00:00+08:00`);
