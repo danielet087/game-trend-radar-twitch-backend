@@ -26,3 +26,10 @@ def test_offline_rendering_can_reject_non_finite_numbers():
         render_json({"bad": float("nan")}, "data/twitch_live.json", allow_nan=False)
     with pytest.raises(ValueError):
         render_json({"bad": float("inf")}, "data/twitch_steam_discovery.json", allow_nan=False)
+
+
+def test_raw_day_files_are_compact_but_other_history_files_are_not(tmp_path):
+    day = write_json(PAYLOAD, tmp_path / "data/twitch_history/2026-11-17.json").read_text(encoding="utf-8")
+    assert day == json.dumps(PAYLOAD, ensure_ascii=False, separators=(",", ":")) + "\n"
+    for name in ("data/twitch_history/manifest.json", "data/other/2026-11-17.json", "data/twitch_history/2026-11-17.json.bak"):
+        assert write_json(PAYLOAD, tmp_path / name).read_text(encoding="utf-8") == json.dumps(PAYLOAD, ensure_ascii=False, indent=2) + "\n"
