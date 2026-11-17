@@ -76,6 +76,22 @@ def test_the_move_copies_missed_changes_then_takes_the_views_out_of_git(database
     assert not any(views.is_view(path) for path in tracked(remote))
     assert stored(database)[index] == in_git[index]
 
+    # Restore undoes the move: the database copy returns to Git and the flag goes.
+    back = []
+    publish_with_retry(SubprocessGitRepository(checkout, disposable_checkout=True),
+                       lambda root: move.restore(root, reports=back),
+                       paths=(*views.PREFIXES, views.FLAG), message="data: return the Twitch views",
+                       input_revision="restore", payload_revision="2" * 64)
+    assert back[-1]["status"] == "restored" and back[-1]["files"] == len(stored(database))
+    restored = tracked(remote)
+    assert views.FLAG not in restored
+    assert {path: blob(remote, path) for path in restored if views.is_view(path)} == stored(database)
+    publish_snapshot(durable_payload(), SubprocessGitRepository(checkout, disposable_checkout=True))
+    assert "TWITCH_VIEWS mirror status=unchanged" in capsys.readouterr().out
+    twice = []
+    move.restore(checkout, reports=twice)
+    assert twice[-1]["status"] == "not_moved"
+
 
 def test_the_move_refuses_a_frontend_without_views(database, tmp_path):
     with pytest.raises(ValueError):

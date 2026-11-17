@@ -14,6 +14,10 @@ With --apply, one frontend publication on the Twitch publication lane:
 
 Git history keeps every earlier version; nothing is rewritten. Running it again
 after the move only drops views that a stale writer put back.
+
+With --restore, one frontend publication undoes the move: the views source is
+copied back into the frontend source and the flag is removed, so every job
+returns to the mirror stage. The database copy stays and keeps being mirrored.
 """
 from __future__ import annotations
 
@@ -88,13 +92,23 @@ def cutover(root: Path, *, payload_revision: str, reports: list, now=None) -> No
                     "removed_from_frontend": removed})
 
 
+def restore(root: Path, *, reports: list) -> None:
+    """Publication callback for --restore; runs again on every retry."""
+    if views_store.views_mode(root) == "mirror":
+        reports.append({"status": "not_moved", "frontend_files": len(views_store.local_views(root))})
+        return
+    head = views_store.materialize(root)
+    (root / views_store.FLAG).unlink()
+    reports.append({"status": "restored", "views_generation": head["generation"], "files": head["files"]})
+
+
 def _revision() -> str:
     from radar_core.publication import snapshot_revision
     return snapshot_revision({"schema": 1, "code": os.environ["GITHUB_SHA"], "run": os.environ["GITHUB_RUN_ID"],
                               "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "1"), "job": "move-twitch-views"})
 
 
-def apply_move() -> dict:
+def apply_move(*, undo: bool = False) -> dict:
     from radar_core.publication import SubprocessGitRepository, publish_with_retry
     from radar_backend.jobs.publish_twitch import FRONTEND_URL, ROOT
 
@@ -102,6 +116,12 @@ def apply_move() -> dict:
         raise SystemExit("FRONTEND_REPO_TOKEN is not configured")
     revision = _revision()
     reports: list[dict] = []
+    if undo:
+        callback = lambda root: restore(root, reports=reports)  # noqa: E731
+        message = "data: return the Twitch views to the frontend source"
+    else:
+        callback = lambda root: cutover(root, payload_revision=revision, reports=reports)  # noqa: E731
+        message = "data: move the Twitch views to the database source"
     with tempfile.TemporaryDirectory(prefix="radar-twitch-move.") as temporary:
         frontend = Path(temporary) / "frontend"
         subprocess.run(["git", "clone", "--depth", "1", "--branch", "main", FRONTEND_URL, str(frontend)], check=True)
@@ -111,9 +131,7 @@ def apply_move() -> dict:
         repository = SubprocessGitRepository(frontend, disposable_checkout=True, environment=os.environ,
             push_command_prefix=("bash", str(ROOT / "scripts/git_frontend_auth.sh")))
         receipt = publish_with_retry(
-            repository, lambda root: cutover(root, payload_revision=revision, reports=reports),
-            paths=(*views_store.PREFIXES, views_store.FLAG),
-            message="data: move the Twitch views to the database source",
+            repository, callback, paths=(*views_store.PREFIXES, views_store.FLAG), message=message,
             input_revision=revision, payload_revision=revision)
     return {**reports[-1], "published_revision": receipt.published_revision, "changed": receipt.changed,
             "attempts": receipt.attempts}
@@ -121,14 +139,20 @@ def apply_move() -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--apply", action="store_true", help="Move the views; otherwise only compare.")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--apply", action="store_true", help="Move the views; otherwise only compare.")
+    action.add_argument("--restore", action="store_true", help="Put the views back into the frontend source.")
     args = parser.parse_args(argv)
-    report = apply_move() if args.apply else compare_in_database()
+    if args.apply or args.restore:
+        report = apply_move(undo=args.restore)
+    else:
+        report = compare_in_database()
+    mode = "apply" if args.apply else "restore" if args.restore else "dry-run"
     text = json.dumps(report, ensure_ascii=False, indent=2)
     print(text)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
-            stream.write(f"### Twitch views move ({'apply' if args.apply else 'dry-run'})\n\n```json\n{text}\n```\n")
+            stream.write(f"### Twitch views move ({mode})\n\n```json\n{text}\n```\n")
     return 0
 
 

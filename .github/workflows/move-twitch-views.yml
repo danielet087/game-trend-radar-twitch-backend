@@ -6,15 +6,16 @@ run-name: "Move Twitch views | mode=${{ inputs.mode }}"
 # database copies and changes nothing. apply needs the owner's approval: it
 # removes the directories from the frontend source and its Git tip (history is
 # kept) and records data/publication/twitch_views.json, after which every
-# Twitch job and the site deploy read the views from the database.
+# Twitch job and the site deploy read the views from the database. restore
+# undoes the move: the views return to the frontend source and the flag goes.
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry-run compares only; apply moves the views"
+        description: "dry-run compares only; apply moves the views; restore moves them back"
         required: true
         type: choice
-        options: [dry-run, apply]
+        options: [dry-run, apply, restore]
         default: dry-run
 
 permissions:
@@ -52,4 +53,5 @@ jobs:
         run: |
           args=()
           if [ "$MODE" = "apply" ]; then args+=(--apply); fi
+          if [ "$MODE" = "restore" ]; then args+=(--restore); fi
           python -m scripts.move_twitch_views "${args[@]}"
