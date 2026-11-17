@@ -143,6 +143,10 @@ jobs:
       - name: Publish to frontend
         if: steps.guard.outputs.should_collect == 'true'
         env:
+          # mirror: the frontend copy of the Twitch views stays authoritative and
+          # each hour also copies them to the database-only source; primary
+          # moves them out of the frontend repository (radar_backend/state/twitch_views_store.py).
+          RADAR_TWITCH_VIEWS: mirror
           RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}

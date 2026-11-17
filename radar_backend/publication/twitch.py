@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from radar_core.publication import (
     PublicationReceipt, SubprocessGitRepository, publish_with_retry, snapshot_revision,
 )
+from radar_core.storage import primary
+from radar_backend.state import twitch_views_store as views_store
 from radar_backend.state.json_snapshot import write_json
 from radar_backend.state.twitch_series import SERIES_PATH, project_series
 from radar_backend.state.twitch_history_views import VIEW_PATHS, project_history_views
@@ -101,6 +104,35 @@ def _census(payload: dict[str, Any]) -> dict[str, Any]:
 
 def merge_frozen_snapshot(
     payload: dict[str, Any], frontend: Path, *, source_revision: str, payload_revision: str,
+    views_mode: str = "mirror",
+) -> None:
+    """Merge, then keep the database copy of the Twitch views in step.
+
+    In primary mode the views come from and return to the database source and
+    leave the checkout, so the frontend commit carries only the other files.
+    """
+    if views_mode not in views_store.MODES:
+        raise ValueError("Unknown Twitch views mode")
+    if views_mode == "primary":
+        if not primary.enabled():
+            raise ValueError("Primary Twitch views require the database primary mode")
+        views_store.materialize(frontend)
+    _merge(payload, frontend, source_revision=source_revision, payload_revision=payload_revision)
+    if views_mode == "primary":
+        views_store.sync(frontend, payload_revision=payload_revision)
+        views_store.remove_local(frontend)
+    elif primary.enabled():
+        try:
+            result = views_store.sync(frontend, payload_revision=payload_revision)
+        except Exception as error:  # The frontend copy stays authoritative.
+            code = getattr(error, "code", type(error).__name__)
+            print(f"::warning::Twitch views mirror not updated ({code}); the next hour copies every difference again.")
+        else:
+            print("TWITCH_VIEWS mirror " + " ".join(f"{key}={value}" for key, value in result.items()))
+
+
+def _merge(
+    payload: dict[str, Any], frontend: Path, *, source_revision: str, payload_revision: str,
 ) -> None:
     """Keep existing observation ordering and all independent enrollment sources."""
     _preflight_existing_json(frontend)
@@ -139,16 +171,19 @@ def merge_frozen_snapshot(
 
 def publish_snapshot(
     payload: dict[str, Any], repository: SubprocessGitRepository, *, max_attempts: int = 5,
+    views_mode: str | None = None,
 ) -> PublicationReceipt:
     """Freeze the source so retries perform only fresh-state merge and Git IO."""
     frozen = deepcopy(payload)
     validate_snapshot(frozen)
     source_revision = input_revision(frozen)
     payload_revision = snapshot_revision(frozen)
+    mode = views_store.views_mode(os.environ) if views_mode is None else views_mode
     return publish_with_retry(
         repository,
         lambda frontend: merge_frozen_snapshot(
             frozen, frontend, source_revision=source_revision, payload_revision=payload_revision,
+            views_mode=mode,
         ),
         paths=PUBLICATION_PATHS,
         message="data: update twitch live metrics",
