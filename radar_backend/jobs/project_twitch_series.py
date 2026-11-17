@@ -1,4 +1,9 @@
-"""Rebuild history projections through the normal DB-first publication engine."""
+"""Rebuild history projections through the normal DB-first publication engine.
+
+Once the Twitch views flag moves the views to the database, the projections
+are rebuilt from the database-only views source and written back there with a
+compare-and-swap; nothing is published to the frontend.
+"""
 from __future__ import annotations
 
 import os
@@ -10,6 +15,7 @@ import tempfile
 from radar_core.publication import SubprocessGitRepository, publish_with_retry, snapshot_revision
 from radar_backend.jobs.publish_twitch import FRONTEND_URL, ROOT
 from radar_backend.adapters.twitch_http import TwitchClient
+from radar_backend.state import twitch_views_store as views_store
 from radar_backend.state.twitch_series import SERIES_PATH, project_series, cover_url, _write
 from radar_backend.state.twitch_history_views import VIEW_PATHS, project_history_views
 
@@ -47,9 +53,18 @@ def main():
         if client:
             restored = restore_covers(frontend, client.get_games_by_ids)
             print(f"Restored {restored} missing Twitch category covers.")
+    mode = views_store.mode_in_database()
     with tempfile.TemporaryDirectory(prefix="radar-twitch-series.") as temporary:
         frontend = Path(temporary) / "frontend"
         subprocess.run(["git", "clone", "--depth", "1", "--branch", "main", FRONTEND_URL, str(frontend)], check=True)
+        if mode == "primary":
+            # The tracking registry and other inputs still come from the frontend.
+            head = views_store.materialize(frontend)
+            project(frontend)
+            result = views_store.sync(frontend, payload_revision=revision, base_generation=head["generation"])
+            print("Twitch history projected in the database views source: "
+                  + " ".join(f"{key}={value}" for key, value in result.items()))
+            return
         for key, value in (("user.name", "github-actions[bot]"), ("user.email", "41898282+github-actions[bot]@users.noreply.github.com")):
             subprocess.run(["git", "-C", str(frontend), "config", key, value], check=True)
         repository = SubprocessGitRepository(frontend, disposable_checkout=True, environment=os.environ,

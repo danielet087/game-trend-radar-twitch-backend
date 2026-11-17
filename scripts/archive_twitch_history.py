@@ -9,6 +9,9 @@ uploaded asset is downloaded back and checked before the manifest records it,
 so the manifest only lists days that can be restored byte for byte. An archived
 day is replaced only by a file that keeps every archived hour, so a day file
 recreated with fewer hours can never shrink its archived copy.
+
+With --frontend the day files come from the frontend checkout until the
+Twitch views flag moves them, then from the database-only views source.
 """
 from __future__ import annotations
 
@@ -38,15 +41,19 @@ def sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def finished_days(history: Path, keep_days: int = KEEP_DAYS) -> list[str]:
+def finished_from(days, keep_days: int = KEEP_DAYS) -> list[str]:
     """Days before the newest keep_days Taipei days, which the site will drop."""
     if type(keep_days) is not int or keep_days < 1:
         raise ValueError("keep_days must be a positive integer")
-    days = sorted(path.stem for path in history.glob("*.json") if DAY.fullmatch(path.stem))
+    days = sorted(day for day in days if DAY.fullmatch(day))
     if not days:
         return []
     first_kept = (date.fromisoformat(days[-1]) - timedelta(days=keep_days - 1)).isoformat()
     return [day for day in days if day < first_kept]
+
+
+def finished_days(history: Path, keep_days: int = KEEP_DAYS) -> list[str]:
+    return finished_from((path.stem for path in history.glob("*.json")), keep_days)
 
 
 def compress(raw: bytes) -> bytes:
@@ -147,17 +154,40 @@ def archive(history: Path, releases, *, keep_days: int = KEEP_DAYS) -> dict:
     return report
 
 
+def _archive_frontend(frontend: Path, releases, keep_days: int) -> dict:
+    """Read the day files from wherever the Twitch views flag says they live."""
+    from radar_backend.state import twitch_views_store as views_store
+
+    if views_store.views_mode(frontend) == "mirror":
+        report = archive(frontend / "data/twitch_history", releases, keep_days=keep_days)
+        return {**report, "source": "frontend"}
+    with tempfile.TemporaryDirectory(prefix="twitch-history-views.") as temporary:
+        root = Path(temporary)
+        head = views_store.read_into(root, ("data/twitch_history/",))
+        report = archive(root / "data/twitch_history", releases, keep_days=keep_days)
+    return {**report, "source": "database", "generation": head["generation"]}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--history", type=Path, required=True, help="data/twitch_history of a frontend checkout")
+    where = parser.add_mutually_exclusive_group(required=True)
+    where.add_argument("--history", type=Path, help="data/twitch_history of a frontend checkout")
+    where.add_argument("--frontend", type=Path,
+                       help="frontend checkout holding data/twitch_history and the Twitch views flag")
     parser.add_argument("--keep-days", type=int, default=KEEP_DAYS)
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", ""))
     args = parser.parse_args(argv)
     if not args.repository:
         raise SystemExit("A GitHub repository for the releases is required")
-    report = archive(args.history, Releases(args.repository), keep_days=args.keep_days)
+    releases = Releases(args.repository)
+    if args.frontend:
+        report = _archive_frontend(args.frontend, releases, args.keep_days)
+    else:
+        report = archive(args.history, releases, keep_days=args.keep_days)
     summary = (f"Archived {len(report['archived'])} day(s), {len(report['unchanged'])} already archived, "
                f"{report['kept_on_site']} newest day(s) not archived yet.")
+    if report.get("source"):
+        summary += f" Day files read from the {report['source']} copy."
     if report["conflicts"]:
         summary += f" Kept the archived copy of {', '.join(report['conflicts'])}: the site file lost hours."
         print("::warning::" + summary)

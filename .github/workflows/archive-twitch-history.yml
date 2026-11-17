@@ -6,8 +6,10 @@ run-name: "Archive Twitch history | keep=${{ inputs.keep_days || 3 }}d | prune=$
 # first copied to a monthly GitHub Release, verified after upload and listed in
 # its manifest. Then, through the normal database-first publication, the site
 # drops each archived day whose bytes match the manifest, whose archived copy
-# verifies again and whose closing view exists. The owner approved the daily
-# removal on 2026-11-16. The Cloudflare scheduler dispatches it at 03:30 Taipei;
+# verifies again and whose closing view exists. Once the Twitch views flag
+# (data/publication/twitch_views.json) moves the views to the database, both
+# jobs read and change the database-only views source instead. The owner
+# approved the daily removal on 2026-11-16. The Cloudflare scheduler dispatches it at 03:30 Taipei;
 # GitHub's best-effort cron stays as a fallback.
 on:
   schedule:
@@ -54,26 +56,32 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # Until the Twitch views flag moves them, the day files are read from
+      # this checkout; afterwards from the database-only views source.
       - name: Read the published day files
         uses: actions/checkout@v7
         with:
           repository: danielet087/game-trend-radar
           path: frontend
           persist-credentials: false
-          sparse-checkout: data/twitch_history
+          sparse-checkout: |
+            data/twitch_history
+            data/publication/twitch_views.json
           sparse-checkout-cone-mode: false
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Test archive rules
-        run: |
-          python -m pip install --disable-pip-version-check 'pytest>=8,<9'
-          python -m pytest -q -p no:cacheprovider tests/test_archive_twitch_history.py
+        run: python -m pytest -q -p no:cacheprovider tests/test_archive_twitch_history.py
       - name: Copy finished days to releases
         env:
           GH_TOKEN: ${{ github.token }}
           KEEP_DAYS: ${{ inputs.keep_days || 3 }}
-        run: python -m scripts.archive_twitch_history --history frontend/data/twitch_history --keep-days "$KEEP_DAYS"
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: python -m scripts.archive_twitch_history --frontend frontend --keep-days "$KEEP_DAYS"
 
   prune:
     needs: archive
