@@ -1,0 +1,55 @@
+name: Move Twitch views to the database
+run-name: "Move Twitch views | mode=${{ inputs.mode }}"
+
+# One-time move of the four high-churn Twitch directories out of the frontend
+# repository (scripts/move_twitch_views.py). dry-run only compares the two
+# database copies and changes nothing. apply needs the owner's approval: it
+# removes the directories from the frontend source and its Git tip (history is
+# kept) and records data/publication/twitch_views.json, after which every
+# Twitch job and the site deploy read the views from the database.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run compares only; apply moves the views"
+        required: true
+        type: choice
+        options: [dry-run, apply]
+        default: dry-run
+
+permissions:
+  contents: read
+
+# Shares the Twitch publication lane, so no collection, prune or backfill
+# writes the views while they are compared or moved.
+concurrency:
+  group: twitch-live-publish
+  cancel-in-progress: false
+
+jobs:
+  move:
+    if: vars.RADAR_DATABASE_MIGRATION_PAUSE != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Test the views rules
+        run: python -m pytest -q -p no:cacheprovider tests/test_twitch_views_store.py tests/test_move_twitch_views.py
+      - name: Compare or move the views
+        env:
+          MODE: ${{ inputs.mode }}
+          RADAR_DATABASE_PRIMARY: ${{ vars.RADAR_DATABASE_PRIMARY || '0' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
+        run: |
+          args=()
+          if [ "$MODE" = "apply" ]; then args+=(--apply); fi
+          python -m scripts.move_twitch_views "${args[@]}"

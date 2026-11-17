@@ -9,6 +9,10 @@ one only when all of these hold:
 
 Any other day stays and is reported. The 24-hour chart reads only the newest
 days, series keep the long history, and the archive keeps every raw byte.
+
+Once the Twitch views flag in the frontend source moves the views to the
+database, the same rules run against the database-only views source and the
+removal is a compare-and-swap on the generation that was checked.
 """
 from __future__ import annotations
 
@@ -26,7 +30,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from scripts.archive_twitch_history import KEEP_DAYS, MANIFEST, Releases, _manifest, finished_days, sha256
+from scripts.archive_twitch_history import (
+    KEEP_DAYS, MANIFEST, Releases, _manifest, finished_days, finished_from, sha256,
+)
 from radar_backend.state.twitch_history_views import CLOSE_PATH, HISTORY_PATH, closing_hour
 
 
@@ -96,6 +102,41 @@ def prune(frontend: Path, verifier: Verifier, keep_days: int = KEEP_DAYS) -> dic
     return report
 
 
+def prune_database(verifier: Verifier, keep_days: int = KEEP_DAYS, *, apply: bool,
+                   payload_revision: str | None, work: Path) -> dict:
+    """Apply the same rules to the database-only views source."""
+    from radar_core.storage.sql import StorageError
+    from radar_backend.state import twitch_views_store as views_store
+
+    for attempt in range(1, views_store.CAS_ATTEMPTS + 1):
+        head, _ = views_store.read(())
+        days = [path[len(HISTORY_PATH):-len(".json")] for path in head["manifest"]
+                if path.startswith(HISTORY_PATH) and path.endswith(".json")]
+        closes = [f"{CLOSE_PATH}{day}.json" for day in finished_from(days, keep_days)]
+        root = work / f"views-{attempt}"
+        head = views_store.read_into(root, (HISTORY_PATH, *closes))
+        (root / HISTORY_PATH).mkdir(parents=True, exist_ok=True)
+        report = {**plan(root, verifier, keep_days), "source": "database", "generation": head["generation"]}
+        if not apply or not report["remove"]:
+            return report
+        try:
+            result = views_store.delete([f"{HISTORY_PATH}{day}.json" for day in report["remove"]],
+                                        base_generation=head["generation"], payload_revision=payload_revision)
+        except StorageError as error:
+            if error.code == "STALE_GENERATION" and attempt < views_store.CAS_ATTEMPTS:
+                continue  # Re-check against the newer generation.
+            raise
+        return {**report, "generation": result["generation"]}
+    raise StorageError("STALE_GENERATION", "The views source kept changing during the removal.")
+
+
+def _revision() -> str:
+    from radar_core.publication import snapshot_revision
+    return snapshot_revision({"schema": 1, "code": os.environ["GITHUB_SHA"],
+                              "run": os.environ["GITHUB_RUN_ID"],
+                              "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "1")})
+
+
 def _summary(report, applied):
     verb = "Removed" if applied else "Would remove"
     text = f"{verb} {len(report['remove'])} archived day file(s), {report['remove_bytes'] / 1e6:.1f} MB."
@@ -112,12 +153,18 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if not args.repository:
         raise SystemExit("A GitHub repository for the releases is required")
-    from radar_core.publication import SubprocessGitRepository, publish_with_retry, snapshot_revision
+    from radar_core.publication import SubprocessGitRepository, publish_with_retry
     from radar_backend.jobs.publish_twitch import FRONTEND_URL, ROOT
+    from radar_backend.state import twitch_views_store as views_store
 
     reports = []
     with tempfile.TemporaryDirectory(prefix="radar-twitch-prune.") as temporary:
         verifier = Verifier(Releases(args.repository), Path(temporary) / "archive")
+        if views_store.mode_in_database() == "primary":
+            reports.append(prune_database(verifier, args.keep_days, apply=args.apply,
+                                          payload_revision=_revision() if args.apply else None,
+                                          work=Path(temporary)))
+            return _finish(reports[-1], args.apply)
         frontend = Path(temporary) / "frontend"
         subprocess.run(["git", "clone", "--depth", "1", "--branch", "main", FRONTEND_URL, str(frontend)], check=True)
         if not args.apply:
@@ -128,9 +175,7 @@ def main(argv=None) -> int:
             for key, value in (("user.name", "github-actions[bot]"),
                                ("user.email", "41898282+github-actions[bot]@users.noreply.github.com")):
                 subprocess.run(["git", "-C", str(frontend), "config", key, value], check=True)
-            revision = snapshot_revision({"schema": 1, "code": os.environ["GITHUB_SHA"],
-                                          "run": os.environ["GITHUB_RUN_ID"],
-                                          "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "1")})
+            revision = _revision()
             repository = SubprocessGitRepository(frontend, disposable_checkout=True, environment=os.environ,
                 push_command_prefix=("bash", str(ROOT / "scripts/git_frontend_auth.sh")))
             # The callback runs on the database snapshot and again on every retry.
@@ -138,8 +183,13 @@ def main(argv=None) -> int:
                 paths=(HISTORY_PATH,), message="data: remove archived Twitch day files from the site",
                 input_revision=revision, payload_revision=revision)
             print(f"Published at frontend {receipt.published_revision} (changed={receipt.changed}).")
-    report = reports[-1]
-    summary = _summary(report, args.apply)
+    return _finish(reports[-1], args.apply)
+
+
+def _finish(report: dict, applied: bool) -> int:
+    summary = _summary(report, applied)
+    if report.get("source") == "database":
+        summary += f" Database views source generation {report['generation']}."
     print(summary)
     print(json.dumps(report, ensure_ascii=False))
     if os.environ.get("GITHUB_STEP_SUMMARY"):

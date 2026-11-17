@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +22,9 @@ from radar_backend.adapters.twitch_snapshot import (
 PUBLICATION_PATHS = (
     "data/twitch_live.json", "data/twitch_history/", SERIES_PATH, *VIEW_PATHS,
     STATUS_PATH, TRACKING_PATH, MAPPING_PATH, DISCOVERY_PATH,
+    # Owned only so each attempt reads the flag from the same database
+    # snapshot as everything else; the merge never changes it.
+    views_store.FLAG,
 )
 
 
@@ -104,23 +106,30 @@ def _census(payload: dict[str, Any]) -> dict[str, Any]:
 
 def merge_frozen_snapshot(
     payload: dict[str, Any], frontend: Path, *, source_revision: str, payload_revision: str,
-    views_mode: str = "mirror",
+    views_mode: str | None = None,
 ) -> None:
     """Merge, then keep the database copy of the Twitch views in step.
 
-    In primary mode the views come from and return to the database source and
-    leave the checkout, so the frontend commit carries only the other files.
+    The stage comes from the views flag in the frontend snapshot unless a test
+    passes it. In primary mode the views come from and return to the database
+    source (compare-and-swap on the generation that was read) and leave the
+    checkout, so the frontend commit carries only the other files.
     """
+    if views_mode is None:
+        views_mode = views_store.views_mode(frontend)
     if views_mode not in views_store.MODES:
         raise ValueError("Unknown Twitch views mode")
     if views_mode == "primary":
         if not primary.enabled():
             raise ValueError("Primary Twitch views require the database primary mode")
-        views_store.materialize(frontend)
+        head = views_store.materialize(frontend)
     _merge(payload, frontend, source_revision=source_revision, payload_revision=payload_revision)
     if views_mode == "primary":
-        views_store.sync(frontend, payload_revision=payload_revision)
-        views_store.remove_local(frontend)
+        result = views_store.sync(frontend, payload_revision=payload_revision,
+                                  base_generation=head["generation"])
+        removed = views_store.remove_local(frontend)
+        print("TWITCH_VIEWS primary " + " ".join(f"{key}={value}" for key, value in result.items())
+              + f" read_generation={head['generation']} kept_out_of_git={removed}")
     elif primary.enabled():
         try:
             result = views_store.sync(frontend, payload_revision=payload_revision)
@@ -178,12 +187,11 @@ def publish_snapshot(
     validate_snapshot(frozen)
     source_revision = input_revision(frozen)
     payload_revision = snapshot_revision(frozen)
-    mode = views_store.views_mode(os.environ) if views_mode is None else views_mode
     return publish_with_retry(
         repository,
         lambda frontend: merge_frozen_snapshot(
             frozen, frontend, source_revision=source_revision, payload_revision=payload_revision,
-            views_mode=mode,
+            views_mode=views_mode,
         ),
         paths=PUBLICATION_PATHS,
         message="data: update twitch live metrics",

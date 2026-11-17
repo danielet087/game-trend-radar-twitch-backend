@@ -33,11 +33,64 @@ def stored(client):
     return primary_store.read_files(client, VIEWS)[1]
 
 
-def test_mode_defaults_to_mirror_and_rejects_anything_else():
-    assert views.views_mode({}) == "mirror"
-    assert views.views_mode({"RADAR_TWITCH_VIEWS": "primary"}) == "primary"
+FLAG_BYTES = views.flag_document(generation=1, files=2, raw_bytes=10, moved_at="2026-11-18T00:00:00Z")
+
+
+def test_the_flag_file_selects_the_stage_and_a_bad_flag_stops(tmp_path):
+    assert views.views_mode(tmp_path) == "mirror"
+    (tmp_path / views.FLAG).parent.mkdir(parents=True)
+    (tmp_path / views.FLAG).write_bytes(FLAG_BYTES)
+    assert views.views_mode(tmp_path) == "primary"
+    for bad in (b"not json", b'{"schema_version": 1, "home": "git", "source": "%s"}' % views.SOURCE.encode(),
+                b'{"schema_version": 1, "home": "database", "source": "other@branch"}'):
+        (tmp_path / views.FLAG).write_bytes(bad)
+        with pytest.raises(ValueError):
+            views.views_mode(tmp_path)
+
+
+def test_the_database_flag_is_read_from_the_frontend_source(database):
+    frontend = views.REPOSITORY + "@" + views.FRONTEND_BRANCH
+    primary_store.bootstrap_primary(database, frontend, {"data/catalog.json": b"{}"}, "frontend")
+    assert views.mode_in_database() == "mirror"
+    head = primary_store.read_files(database, frontend, paths=())[0]
+    primary_store.publish_patch(database, frontend, base_generation=head["generation"],
+                                changed={views.FLAG: FLAG_BYTES}, operation_id="flag", projection_required=False)
+    assert views.mode_in_database() == "primary"
+
+
+def test_a_primary_write_never_overwrites_a_newer_generation(database, tmp_path):
+    root = tmp_path / "checkout"
+    assert views.materialize(root)["generation"] == 1
+    (root / "data/twitch_series/index.json").write_bytes(b'{"schema_version": 1, "mine": true}')
+    head = primary_store.read_files(database, VIEWS, paths=())[0]
+    primary_store.publish_patch(database, VIEWS, base_generation=head["generation"],
+                                changed={"data/twitch_history_close/2026-09-27.json": b'{"other": 1}'},
+                                operation_id="other-writer", projection_required=False)
+    with pytest.raises(StorageError) as stale:
+        views.sync(root, payload_revision="e" * 64, base_generation=1)
+    assert stale.value.code == "STALE_GENERATION"
+    assert stored(database)["data/twitch_series/index.json"] == SEED["data/twitch_series/index.json"]
+    assert views.sync(root, payload_revision="e" * 64, base_generation=2)["status"] == "written"
+
+
+def test_read_into_and_delete_work_on_the_views_source_only(database, tmp_path):
+    head = views.read_into(tmp_path, ("data/twitch_history/",))
+    assert sorted(views.local_views(tmp_path)) == ["data/twitch_history/2026-09-28.json"]
+    assert views.read(())[1] == {} and head["generation"] == 1
     with pytest.raises(ValueError):
-        views.views_mode({"RADAR_TWITCH_VIEWS": "git"})
+        views.delete(["data/twitch_live.json"], base_generation=1, payload_revision="f" * 64)
+    with pytest.raises(StorageError):
+        views.delete(["data/twitch_history/2026-09-28.json"], base_generation=7, payload_revision="f" * 64)
+    result = views.delete(["data/twitch_history/2026-09-28.json"], base_generation=1, payload_revision="f" * 64)
+    assert result == {"status": "written", "generation": 2, "deleted": 1}
+    assert sorted(stored(database)) == ["data/twitch_series/index.json"]
+
+
+def test_materialize_refuses_a_source_without_the_series_index(database, tmp_path):
+    views.delete(["data/twitch_series/index.json"], base_generation=1, payload_revision="f" * 64)
+    with pytest.raises(StorageError) as missing:
+        views.materialize(tmp_path)
+    assert missing.value.code == "MISSING_VIEWS"
 
 
 def test_sync_writes_differences_and_deletions_then_is_idempotent(database, tmp_path):

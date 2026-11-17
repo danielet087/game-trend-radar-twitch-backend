@@ -58,3 +58,41 @@ def test_a_missing_release_keeps_every_day(tmp_path):
     report = prune(root, Verifier(MemoryReleases(), tmp_path / "work"), keep_days=3)
     assert report["remove"] == [] and report["kept"] == {"2026-11-01": "not archived"}
     assert (root / HISTORY_PATH / "2026-11-01.json").exists()
+
+
+def test_after_the_move_archived_days_leave_the_database_views_source(tmp_path, monkeypatch):
+    from radar_core.storage import documents, primary, primary_store
+    from radar_core.storage.sql import SqliteClient, StorageError
+    from radar_backend.state import twitch_views_store as views
+    from scripts.prune_twitch_history import prune_database
+
+    days = ["2026-11-01", "2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05"]
+    root = site(tmp_path / "views", days)
+    releases = MemoryReleases()
+    archive(root / HISTORY_PATH, releases, keep_days=3)
+    (root / CLOSE_PATH / "2026-11-02.json").unlink()
+    client = SqliteClient(tmp_path / "radar.sqlite")
+    documents.initialize(client)
+    source = views.REPOSITORY + "@" + views.BRANCH
+    primary_store.bootstrap_primary(client, source, views.local_views(root), "seed")
+    monkeypatch.setattr(primary, "client", lambda: client)
+
+    dry = prune_database(Verifier(releases, tmp_path / "a"), 3, apply=False, payload_revision=None, work=tmp_path / "w1")
+    assert dry["remove"] == ["2026-11-01"] and dry["kept"] == {"2026-11-02": "no usable closing view"}
+    assert dry["source"] == "database" and dry["generation"] == 1
+
+    real, calls = primary.write_files, []
+
+    def stale_once(*args, **kwargs):
+        calls.append(kwargs["base_generation"])
+        if len(calls) == 1:
+            raise StorageError("STALE_GENERATION", "moved")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(primary, "write_files", stale_once)
+    done = prune_database(Verifier(releases, tmp_path / "b"), 3, apply=True, payload_revision="9" * 64, work=tmp_path / "w2")
+    assert done["remove"] == ["2026-11-01"] and done["generation"] == 2 and calls == [1, 1]
+    left = primary_store.read_files(client, source)[1]
+    assert f"{HISTORY_PATH}2026-11-01.json" not in left and f"{HISTORY_PATH}2026-11-02.json" in left
+    assert f"{CLOSE_PATH}2026-11-01.json" in left  # The closing view outlives the raw file.
+    client.close()
