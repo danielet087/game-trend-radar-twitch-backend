@@ -115,6 +115,9 @@ def normalize_tracking_state(
             if str(observation.get("game_id")) != game_id:
                 raise ValueError("Tracked observation identity does not match")
             parse_timestamp_fn(observation.get("observation_at"))
+            # Older observations carry a copy of their own entry's tracking
+            # state. The entry is the current copy; the nested one only goes stale.
+            observation.pop("tracking", None)
         if now is not None:
             reconcile_tracking_entry_fn(entry, now, non_game_ids=non_game_ids)
     return state
@@ -614,6 +617,7 @@ def enroll_observation(
     row["observation_at"] = timestamp_fn(observed_at)
     row["observation_status"] = "current"
     row["observation_freshness"] = "fresh"
-    entry["last_observation"] = deepcopy_fn(row)
+    # The published census row keeps its tracking state; the entry already is it.
+    entry["last_observation"] = deepcopy_fn({key: value for key, value in row.items() if key != "tracking"})
     state["updated_at"] = timestamp_fn(observed_at)
     return entry
