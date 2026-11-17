@@ -47,7 +47,7 @@ jobs:
     # Includes setup, the 25-minute collection budget, and database/Git publication.
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Check collection credentials
@@ -68,7 +68,7 @@ jobs:
             echo '### Twitch: 缺少收集或發布 Secrets，本次未收集、未發布。' >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: steps.credentials.outputs.configured == 'true'
         with:
           python-version: '3.12'
@@ -102,7 +102,7 @@ jobs:
       - name: Restore legacy daily follower counts
         if: steps.guard.outputs.should_collect == 'true' && vars.RADAR_DATABASE_PRIMARY != '1'
         continue-on-error: true
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .cache/twitch_followers.json
           key: twitch-followers-v1-${{ github.run_id }}-${{ github.run_attempt }}
@@ -124,7 +124,7 @@ jobs:
       - name: Save legacy follower lookup progress
         if: always() && steps.guard.outputs.should_collect == 'true' && vars.RADAR_DATABASE_PRIMARY != '1' && hashFiles('.cache/twitch_followers.json') != ''
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .cache/twitch_followers.json
           key: twitch-followers-v1-${{ github.run_id }}-${{ github.run_attempt }}
@@ -133,7 +133,7 @@ jobs:
         run: python -m json.tool output/twitch_live.json > /dev/null
       - name: Preserve collected JSON
         if: steps.guard.outputs.should_collect == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: twitch-live-json
           path: output/twitch_live.json
@@ -152,7 +152,7 @@ jobs:
           echo '### Twitch: 已發布最新候選與每小時歷史紀錄。' >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve acknowledged publication revision
         if: always() && steps.guard.outputs.should_collect == 'true' && hashFiles('output/twitch_publication.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: twitch-publication-receipt
           path: output/twitch_publication.json
@@ -172,7 +172,7 @@ jobs:
       actions: read
       contents: write
     steps:
-      - uses: danielet087/game-trend-radar-backend/.github/actions/scheduled-failure-notice@202d8a9945c5cb0a2f182a327dd533ac98d8178e
+      - uses: danielet087/game-trend-radar-backend/.github/actions/scheduled-failure-notice@e743210a045e1d1603b381e0476e9a6369972bf1
         with:
           workflow-key: collect.yml
           job-name: collect
