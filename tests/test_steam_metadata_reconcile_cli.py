@@ -92,10 +92,36 @@ def test_cli_cached_reverse_identity_enriches_metadata_and_preserves_all_census(
     assert command._row_measurement(after_observation) == command._row_measurement(before_observation)
     assert after_observation["steam_matches"][0]["display_name"] == "最新繁中遊戲名稱"
     assert after_observation["observation_at"] == before_observation["observation_at"]
-    assert latest["tracking_state"] == registry and latest["steam_mapping_state"] == mapping
+    assert not {"tracking_state", "steam_mapping_state"}.intersection(latest)
+    assert mapping["games"]["100"]["status"] == "matched"
     final = file_bytes(frontend)
     assert {name for name in original if original[name] != final[name]} == {
         "data/twitch_live.json", "data/twitch_tracking.json", "data/twitch_steam_mapping.json"}
+
+
+def test_slim_snapshot_validates_against_the_published_registry(monkeypatch):
+    # Published snapshots no longer embed the registries; twitch_tracking.json is
+    # the registry the saved census is checked against.
+    bundle = inputs()
+    bundle["snapshot"].pop("tracking_state")
+    block_network(monkeypatch)
+
+    latest, _, _, report = command.reconcile_metadata(**bundle, now=NOW)
+
+    assert report["lookup_count"] == 0 and report["enriched_steam_appids"] == ["100"]
+    assert not {"tracking_state", "steam_mapping_state"}.intersection(latest)
+    assert command.measurement_projection(latest) == command.measurement_projection(bundle["snapshot"])
+    assert latest["tracked_games"][0]["steam_matches"][0]["display_name"] == "最新繁中遊戲名稱"
+
+
+def test_slim_snapshot_still_requires_a_registry_identity_for_tracked_rows(monkeypatch):
+    bundle = inputs()
+    bundle["snapshot"].pop("tracking_state")
+    del bundle["tracking"]["games"]["1"]
+    block_network(monkeypatch)
+
+    with pytest.raises(ValueError, match="registry identity"):
+        command.reconcile_metadata(**bundle, now=NOW)
 
 
 def test_new_recent_steam_enrollment_never_fabricates_an_unmeasured_census(tmp_path, monkeypatch):

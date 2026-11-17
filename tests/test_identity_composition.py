@@ -248,10 +248,9 @@ def test_offline_metadata_refresh_uses_canonical_mapping_without_identity_reques
     )
     report = reconcile_frontend(tmp_path, NOW + timedelta(hours=1))
     updated = json.loads((tmp_path / "data/twitch_live.json").read_text())
+    mapping = json.loads((tmp_path / "data/twitch_steam_mapping.json").read_text())
     assert report["lookup_count"] == 0 and report["observed_rows_unchanged"] is True
-    assert (
-        updated["steam_mapping_state"]["games"]["100"]["steam"]["name"]
-        == "Fresh official Steam title"
-    )
+    assert mapping["games"]["100"]["steam"]["name"] == "Fresh official Steam title"
+    assert not {"tracking_state", "steam_mapping_state"}.intersection(updated)
     assert measurement_projection(updated) == measurement_projection(original)
     assert {path: path.read_bytes() for path in untouched} == untouched
