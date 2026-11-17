@@ -92,7 +92,7 @@ os.execv(real,[real,*sys.argv[1:]])
     assert set(saved_mapping['games']) == {'100', '101'}
     assert saved_mapping['updated_at'] == concurrent_mapping['updated_at']
     saved_latest = json.loads(git('--git-dir',remote,'show','main:data/twitch_live.json'))
-    assert saved_latest['steam_mapping_state'] == saved_mapping
+    assert not {'tracking_state', 'steam_mapping_state'}.intersection(saved_latest)
     saved_discovery = json.loads(git('--git-dir',remote,'show','main:data/twitch_steam_discovery.json'))
     assert set(saved_discovery['games']) == {'1', '2'}
     assert saved_discovery['updated_at'] == concurrent_discovery['updated_at']

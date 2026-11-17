@@ -83,8 +83,10 @@ def test_one_acknowledged_commit_contains_census_history_state_and_bound_receipt
     assert status["payload_revision"] == receipt.payload_revision
     assert "published_revision" not in status
     latest = read_remote(remote, "data/twitch_live.json")
-    assert latest["tracking_state"] == read_remote(remote, "data/twitch_tracking.json")
-    assert latest["steam_mapping_state"] == read_remote(remote, "data/twitch_steam_mapping.json")
+    # The registries are published once, in their own files of the same commit.
+    assert not {"tracking_state", "steam_mapping_state"}.intersection(latest)
+    assert set(read_remote(remote, "data/twitch_tracking.json")["games"]) == set(source["tracking_state"]["games"])
+    assert set(read_remote(remote, "data/twitch_steam_mapping.json")["games"]) == set(source["steam_mapping_state"]["games"])
     assert latest["steam_discovery_state"] == read_remote(remote, "data/twitch_steam_discovery.json")
     assert read_remote(remote, "data/catalog.json") == {"version": 1}
 

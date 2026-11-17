@@ -768,12 +768,18 @@ def latest_observation(
     *,
     deepcopy_fn,
 ) -> dict:
-    """Copy the frozen result and embed the independently merged registries."""
+    """Copy the frozen result without repeating the separately published registries.
+
+    The merged tracking registry and Steam mapping are written to
+    twitch_tracking.json and twitch_steam_mapping.json in the same commit, and
+    the site loads those files anyway, so repeating them here cost every page
+    load about 2.9 MB. The small Steam discovery state stays embedded because
+    the site reads it only from this file. Census comparisons already ignore
+    all three registries.
+    """
     latest_payload = deepcopy_fn(payload)
-    if merged_tracking is not None and "tracking_state" in payload:
-        latest_payload["tracking_state"] = merged_tracking
-    if merged_mapping is not None and "steam_mapping_state" in payload:
-        latest_payload["steam_mapping_state"] = merged_mapping
+    latest_payload.pop("tracking_state", None)
+    latest_payload.pop("steam_mapping_state", None)
     if merged_discovery is not None and "steam_discovery_state" in payload:
         latest_payload["steam_discovery_state"] = merged_discovery
     return latest_payload

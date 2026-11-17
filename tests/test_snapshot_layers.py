@@ -369,10 +369,11 @@ def test_store_snapshot_passes_current_merge_callbacks_and_path_constants(
     payload = full_payload()
     calls, writes = [], []
     fields = ["tracking_state", "steam_mapping_state", "steam_discovery_state"]
+    outputs = {}
     for name, field in zip(
         ("merge_tracking_state", "merge_mapping_state", "merge_discovery_state"), fields
     ):
-        merged = {"fixture": field}
+        merged = outputs[field] = {"fixture": field}
 
         def merge(old, new, owner=name, expected=payload[field], output=merged):
             calls.append((owner, old, new))
@@ -405,7 +406,11 @@ def test_store_snapshot_passes_current_merge_callbacks_and_path_constants(
         "custom/status_path.json",
     ]
     for position, field in enumerate(fields, start=2):
-        assert writes[1][0][field] is writes[position][0]
+        assert writes[position][0] is outputs[field]
+    # The registries have their own files; only the discovery state is embedded.
+    latest = writes[1][0]
+    assert not {"tracking_state", "steam_mapping_state"}.intersection(latest)
+    assert latest["steam_discovery_state"] is outputs["steam_discovery_state"]
 
 
 @pytest.mark.parametrize("api", APIS)
@@ -458,7 +463,7 @@ def test_history_projection_preserves_optional_evidence_and_reference_contract()
     assert "top_games" not in projected
 
 
-def test_latest_projection_copies_census_but_embeds_merged_registry_objects():
+def test_latest_projection_copies_census_and_embeds_only_merged_discovery():
     payload = full_payload()
     merged = [{"merged": "tracking"}, {"merged": "mapping"}, {"merged": "discovery"}]
     before = deepcopy(payload)
@@ -466,10 +471,9 @@ def test_latest_projection_copies_census_but_embeds_merged_registry_objects():
     assert projected["candidate_games"] == payload["candidate_games"]
     assert projected["candidate_games"] is not payload["candidate_games"]
     assert projected["candidate_games"][0] is not payload["candidate_games"][0]
-    for field, value in zip(
-        ("tracking_state", "steam_mapping_state", "steam_discovery_state"), merged
-    ):
-        assert projected[field] is value
+    # twitch_tracking.json and twitch_steam_mapping.json carry the registries.
+    assert not {"tracking_state", "steam_mapping_state"}.intersection(projected)
+    assert projected["steam_discovery_state"] is merged[2]
     assert payload == before
 
 

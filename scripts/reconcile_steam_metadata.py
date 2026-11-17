@@ -39,14 +39,15 @@ def measurement_projection(snapshot: dict) -> dict:
     return projected
 
 
-def _validate_saved_census(snapshot: dict) -> None:
+def _validate_saved_census(snapshot: dict, tracking: dict | None = None) -> None:
     # Metadata can expire a membership after its last real measurement. The
     # census publisher's active-membership guard applies when taking a new
     # observation; an offline refresh must also accept its own retained output.
+    # Newer snapshots no longer embed the registry; it is twitch_tracking.json.
     validation = deepcopy(snapshot)
     tracked = validation.get("tracked_games", [])
     if isinstance(tracked, list) and tracked:
-        registry = validate_persisted_tracking(validation.get("tracking_state"))
+        registry = validate_persisted_tracking(validation.get("tracking_state") or tracking)
         registry = normalize_tracking_state(registry, parse_timestamp(validation["generated_at"]),
                                             non_game_ids=NON_GAME_IDS)
         for row in tracked:
@@ -65,7 +66,7 @@ def reconcile_metadata(snapshot: dict, tracking: dict, mapping: dict, discovery:
     clock = now.astimezone(timezone.utc)
     if not isinstance(snapshot, dict):
         raise ValueError("Latest Twitch snapshot must be an object")
-    _validate_saved_census(snapshot)
+    _validate_saved_census(snapshot, tracking)
     previous_tracking = validate_persisted_tracking(tracking)
     previous_mapping = validate_persisted_mapping(mapping)
     discoveries = validate_persisted_discovery(discovery)
@@ -122,8 +123,9 @@ def reconcile_metadata(snapshot: dict, tracking: dict, mapping: dict, discovery:
                 raise ValueError("Registry observation changed during metadata reconciliation")
 
     registry = validate_persisted_tracking(registry)
-    latest["tracking_state"] = deepcopy(registry)
-    latest["steam_mapping_state"] = deepcopy(mappings)
+    # The registries are their own published files; the census does not repeat them.
+    latest.pop("tracking_state", None)
+    latest.pop("steam_mapping_state", None)
     latest["steam_catalog_summary"] = {
         "status": "ok", "catalog_games": len(normalized_catalog),
         "recent_releases": sum(bool(row["is_recent"]) for row in normalized_catalog),
