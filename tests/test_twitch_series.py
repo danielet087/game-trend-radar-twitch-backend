@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from radar_backend.state.twitch_series import project_series
+from radar_backend.state.twitch_series import HEAT_PROJECTION, heat_projection, project_series
 from radar_backend.jobs.project_twitch_series import restore_covers
 from tests.test_twitch_tracking_storage import tracking_state
 
@@ -253,6 +253,57 @@ class TwitchSeriesTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Tracking registry is required'):
                 project_series(root)
             self.assertEqual(index_path.read_bytes(), published)
+
+    def test_heat_files_keep_only_the_planning_fields_for_every_archived_month(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            history = root / 'data/twitch_history'
+            history.mkdir(parents=True)
+            filtered = {'rule': 'followers_gt_1000_viewers_gte_10_v1', 'status': 'complete', 'eligible_streamer_count': 1,
+                        'eligible_viewer_count': 40, 'median_viewer_count': 40}
+            chinese = {'viewer_count': 30, 'streamer_count': 3, 'median_viewer_count': 9, 'largest_stream_viewer_count': 20,
+                       'measurement_source': 'helix_language_filter', 'measurement_started_at': '2026-09-30T16:01:00Z',
+                       'measurement_finished_at': '2026-09-30T16:09:00Z', 'streamer_counts_above_viewers': [1, 0, 0],
+                       'filtered_audience': filtered}
+            full = {'game_id': '42', 'game_name': 'Test', 'viewer_count': 120, 'streamer_count': 7,
+                    'streamer_counts_above_viewers': [2, 1, 0], 'filtered_audience': filtered,
+                    'audience_regions': {'zh': chinese, 'ja': {'viewer_count': 5}}}
+            days = {'2026-09-30': ('2026-09-30T15:00:00Z', [{'game_id': '42', 'game_name': 'Test', 'viewer_count': 14,
+                                                             'audience_regions': {'zh': None}}]),
+                    '2026-10-01': ('2026-09-30T16:00:00Z', [full])}
+            for date, (hour, games) in days.items():
+                (history / f'{date}.json').write_text(json.dumps({'schema_version': 1, 'timezone': 'Asia/Taipei', 'date': date,
+                    'hours': {hour: {'generated_at': hour.replace(':00:00Z', ':12:00Z'), 'games': games}}}))
+            (root / 'data/twitch_tracking.json').write_text(json.dumps(tracking_state('42')))
+            project_series(root)
+            base = root / 'data/twitch_series/42'
+            october = json.loads((base / '2026-10-heat.json').read_text())
+            self.assertEqual(october, {'schema_version': 1, 'timezone': 'Asia/Taipei', 'game_id': '42', 'month': '2026-10',
+                'projection': HEAT_PROJECTION, 'hours': {'2026-09-30T16:00:00Z': {
+                    'generated_at': '2026-09-30T16:12:00Z', 'viewer_count': 120, 'streamer_count': 7,
+                    'audience_regions': {'zh': {'viewer_count': 30, 'streamer_count': 3, 'largest_stream_viewer_count': 20,
+                                                'measurement_source': 'helix_language_filter'}}}}})
+            self.assertEqual(json.loads((base / '2026-09-heat.json').read_text())['hours'],
+                             {'2026-09-30T15:00:00Z': {'generated_at': '2026-09-30T15:12:00Z', 'viewer_count': 14}})
+            self.assertEqual(heat_projection(json.loads((base / '2026-10.json').read_text())), october)
+            self.assertEqual(json.loads((base / '2026-10.json').read_text())['hours']['2026-09-30T16:00:00Z']['filtered_audience'], filtered)
+            # An hourly run also backfills a month it did not touch, and keeps
+            # unchanged heat files byte for byte.
+            (base / '2026-09-heat.json').unlink()
+            before = (base / '2026-10-heat.json').read_bytes()
+            project_series(root, 'data/twitch_history/2026-10-01.json')
+            self.assertEqual(json.loads((base / '2026-09-heat.json').read_text())['hours'],
+                             {'2026-09-30T15:00:00Z': {'generated_at': '2026-09-30T15:12:00Z', 'viewer_count': 14}})
+            self.assertEqual((base / '2026-10-heat.json').read_bytes(), before)
+            index = json.loads((root / 'data/twitch_series/index.json').read_text())
+            self.assertEqual(index['games']['42']['months'], ['2026-09', '2026-10'])
+            # A corrected census that omits the game removes its heat row too.
+            day = history / '2026-10-01.json'
+            corrected = json.loads(day.read_text())
+            corrected['hours']['2026-09-30T16:00:00Z']['games'] = []
+            day.write_text(json.dumps(corrected))
+            project_series(root, 'data/twitch_history/2026-10-01.json')
+            self.assertEqual(json.loads((base / '2026-10-heat.json').read_text())['hours'], {})
 
     def test_cover_backfill_only_requests_missing_artwork_and_preserves_metrics(self):
         with tempfile.TemporaryDirectory() as temp:
