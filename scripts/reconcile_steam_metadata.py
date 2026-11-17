@@ -119,6 +119,8 @@ def reconcile_metadata(snapshot: dict, tracking: dict, mapping: dict, discovery:
         if observation is not None:
             before = _row_measurement(observation)
             enrich(observation)
+            # The entry is the observation's tracking state; never nest a copy.
+            observation.pop("tracking", None)
             if _row_measurement(observation) != before:
                 raise ValueError("Registry observation changed during metadata reconciliation")
 

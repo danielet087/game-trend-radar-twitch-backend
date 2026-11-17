@@ -51,6 +51,22 @@ def test_enrolled_below_threshold_and_genuine_empty_census_are_saved(tmp_path, m
     assert (tmp_path / "data/twitch_collection_status.json").exists()
 
 
+def test_next_store_drops_nested_tracking_copies_but_census_rows_keep_theirs(tmp_path):
+    payload = tracked_snapshot()
+    payload["tracked_games"][0]["tracking"] = {"status": "active"}
+    existing = deepcopy(payload["tracking_state"])
+    existing["games"]["1"]["last_observation"]["tracking"] = {"status": "active", "copied": True}
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data/twitch_tracking.json").write_text(json.dumps(existing))
+    relative = store_snapshot(payload, tmp_path)
+    saved = json.loads((tmp_path / "data/twitch_tracking.json").read_text())
+    assert "tracking" not in saved["games"]["1"]["last_observation"]
+    history = json.loads((tmp_path / relative).read_text())["hours"]["2026-09-28T16:00:00Z"]["games"]
+    assert history[0]["tracking"] == {"status": "active"}
+    latest = json.loads((tmp_path / "data/twitch_live.json").read_text())
+    assert latest["tracked_games"][0]["tracking"] == {"status": "active"}
+
+
 def test_tracked_game_is_retained_after_badge_becomes_not_new(tmp_path):
     payload = tracked_snapshot()
     payload["tracked_games"][0]["verification"]["status"] = "not_new"

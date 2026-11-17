@@ -134,6 +134,32 @@ def test_history_backfill_reevaluates_saved_igdb_fourteen_day_miss():
     assert row["release_experiment"]["igdb_first_release_date"]["predicted_new"] is False
 
 
+def test_census_row_keeps_tracking_but_registry_observation_does_not():
+    at = NOW - timedelta(days=1)
+    state = normalize_tracking_state(None, at)
+    row = {
+        "game_id": "1", "game_name": "Tracked game", "igdb_id": "101",
+        "viewer_count": 8000, "streamer_count": 1, "median_viewer_count": 8000,
+        "verification": {"status": "pending"},
+        "release_evidence": {"first_release_date": timestamp(NOW - timedelta(days=5)),
+                             "checked_at": timestamp(at)},
+    }
+    entry = enroll_observation(state, row, at)
+    assert row["tracking"]["status"] == "active"
+    assert entry["last_observation"] == {key: value for key, value in row.items() if key != "tracking"}
+
+
+def test_normalizing_drops_the_stale_tracking_copy_of_older_observations():
+    state = initial_state()
+    older = deepcopy(state)
+    older["games"]["1"]["last_observation"]["tracking"] = {"status": "active", "copied": True}
+    before = deepcopy(older)
+    normalized = normalize_tracking_state(older)
+    assert "tracking" not in normalized["games"]["1"]["last_observation"]
+    assert normalized == normalize_tracking_state(state)
+    assert older == before
+
+
 def test_persisted_non_game_is_removed_from_active_set_without_collection(tmp_path):
     state = initial_state(game_id="26936")
     # This exercises corrupt/legacy state as well as new admission rejection.

@@ -92,6 +92,7 @@ def test_cli_cached_reverse_identity_enriches_metadata_and_preserves_all_census(
     assert command._row_measurement(after_observation) == command._row_measurement(before_observation)
     assert after_observation["steam_matches"][0]["display_name"] == "最新繁中遊戲名稱"
     assert after_observation["observation_at"] == before_observation["observation_at"]
+    assert "tracking" not in after_observation and latest["tracked_games"][0]["tracking"]["status"] == "active"
     assert not {"tracking_state", "steam_mapping_state"}.intersection(latest)
     assert mapping["games"]["100"]["status"] == "matched"
     final = file_bytes(frontend)
