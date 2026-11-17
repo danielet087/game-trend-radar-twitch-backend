@@ -107,3 +107,47 @@ def test_the_dry_run_compares_both_database_copies(database):
     assert report["mode"] == "mirror" and report["frontend_files"] == 3 and report["views_files"] == 2
     assert (report["only_frontend"], report["only_database"], report["different"]) == (1, 0, 1)
     assert report["examples"]["different"] == ["data/twitch_series/index.json"]
+
+
+def test_the_move_through_the_real_database_bridge(database, repository, monkeypatch, capsys):
+    """Production path: the frontend source itself is database-primary."""
+    from radar_core.storage.primary import GitPrimary
+
+    remote, seed, checkout = repository
+    primary_store.bootstrap_primary(database, FRONTEND, {"data/catalog.json": b'{"version": 1}\n'}, "frontend")
+
+    def bridged():
+        return SubprocessGitRepository(checkout, disposable_checkout=True,
+                                       primary=GitPrimary(FRONTEND, db=database))
+
+    def frontend_views():
+        return {path for path in primary_store.read_files(database, FRONTEND)[1] if views.is_view(path)}
+
+    publish_snapshot(durable_payload(), bridged())
+    assert frontend_views() and "TWITCH_VIEWS mirror status=written" in capsys.readouterr().out
+    held = set(stored(database))
+    assert frontend_views() == held
+
+    reports = []
+    publish_with_retry(bridged(), lambda root: move.cutover(root, payload_revision="3" * 64, reports=reports),
+                       paths=(*views.PREFIXES, views.FLAG), message="data: move the Twitch views",
+                       input_revision="move", payload_revision="3" * 64)
+    assert reports[-1]["status"] == "moved" and reports[-1]["copied"] == {"status": "identical"}
+    assert frontend_views() == set() and views.mode_in_database() == "primary"
+    assert not any(views.is_view(path) for path in tracked(remote)) and views.FLAG in tracked(remote)
+
+    # A primary run rebuilds a view the database lost and writes only there.
+    compact = "data/twitch_history_compact/2026-09-29.json"
+    lost = stored(database)[compact]
+    views.delete([compact], base_generation=views.read(())[0]["generation"], payload_revision="5" * 64)
+    publish_snapshot(durable_payload(), bridged())
+    assert "TWITCH_VIEWS primary status=written" in capsys.readouterr().out
+    assert stored(database)[compact] == lost and set(stored(database)) == held
+    assert frontend_views() == set() and not any(views.is_view(path) for path in tracked(remote))
+
+    back = []
+    publish_with_retry(bridged(), lambda root: move.restore(root, reports=back),
+                       paths=(*views.PREFIXES, views.FLAG), message="data: return the Twitch views",
+                       input_revision="restore", payload_revision="4" * 64)
+    assert back[-1]["status"] == "restored" and frontend_views() == held
+    assert views.mode_in_database() == "mirror" and views.FLAG not in tracked(remote)
