@@ -52,7 +52,7 @@ Twitch 以外的工作會查 active 狀態與分頁執行紀錄。同 slot 已�
 ## Twitch 判斷流程
 
 1. 原定每小時第 05 分的 Cron 才檢查 Twitch，以實際執行時間取得目前 UTC 小時。同小時內延遲數分鐘仍可檢查，跨小時的舊 Cron 會略過；若提早於原定時刻收到事件則等待。台灣也是第 05 分，UTC 時段只用於內部識別。
-2. 讀取前端儲存庫的 `data/twitch_collection_status.json`。只有 `collection_complete: true`、時間欄位一致且 `observed_slot` 是目前小時，才視為已完成。
+2. 讀取網站上的 `data/twitch_collection_status.json`（`https://danielet087.github.io/game-trend-radar/…`，2026-11-18 起；網站資料改在每小時部署時從資料庫組出，不再放在 Git）。只有 `collection_complete: true`、時間欄位一致且 `observed_slot` 是目前小時，才視為已完成。:05 檢查時網站最多只有前一小時的回條，判斷結果相同；若本小時其實已收過，Twitch workflow 自己的檢查會讀資料庫並略過。網站不可重新導向（例如改用自訂網域），否則讀取會被拒絕、Twitch 停止派發。
 3. 分別查詢 `queued`、`in_progress`、`waiting`、`pending`、`requested` 工作，任何一種存在就等待。即使是前一天尚未解除的工作，也不會被最近幾筆歷史遮住。
 4. 分頁讀取最近兩小時內建立的執行紀錄。當前小時建立的工作，或標題含 `slot=<目前 UTC 時段>` 的工作，計入嘗試次數。GitHub `run_attempt` 也計入；已完成但沒有發布回條的工作同樣不視為成功。
 5. 保留事件重送時的防重複保護：本小時已看到 2 次嘗試，或最近一次完成未滿 10 分鐘，就不觸發。狀態讀取失敗、內容異常或超過讀取上限時停止本次觸發；Cloudflare 不會另外安排本小時重試，下次定期檢查在下一小時第 05 分。
@@ -62,7 +62,7 @@ GitHub 原本第 17 分的 Twitch 定時排程已移除。手動及必要的 pus
 
 ### 回條代表什麼
 
-回條與 `twitch_live.json`、台灣日期的逐時歷史檔一同提交到前端儲存庫；它表示資料已提交成功，**不表示 GitHub Pages 建置已完成**。`collection_complete` 表示本次有效 census 已完成並發布，並不表示所有低優先序類別的追隨者查詢都已完成。未查完的篩選觀眾中位數仍保留 `null`，不能為了這些缺值反覆觸發整批收集。
+回條與 `twitch_live.json`、台灣日期的逐時歷史檔一同寫進資料庫；網站上看得到它，表示那次資料已隨部署上線。`collection_complete` 表示本次有效 census 已完成並發布，並不表示所有低優先序類別的追隨者查詢都已完成。未查完的篩選觀眾中位數仍保留 `null`，不能為了這些缺值反覆觸發整批收集。
 
 | 欄位 | 意義 |
 | --- | --- |

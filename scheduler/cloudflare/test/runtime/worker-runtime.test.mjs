@@ -31,7 +31,7 @@ async function withRuntime(receiptStatus, callback) {
       const record = { method: request.method, url: request.url, authorization: request.headers.get('Authorization') };
       if (request.method === 'POST') record.body = await request.json();
       requests.push(record);
-      if (url.hostname === 'raw.githubusercontent.com' && url.pathname.endsWith('/data/twitch_collection_status.json')) {
+      if (url.hostname === 'danielet087.github.io' && url.pathname.endsWith('/data/twitch_collection_status.json')) {
         return new Response(null, { status: receiptStatus, ...(receiptStatus === 302 ? { headers: { Location: 'https://fixture.invalid/redirect-target' } } : {}) });
       }
       if (url.hostname === 'api.github.com' && url.pathname === '/repos/danielet087/game-trend-radar-twitch-backend/actions/workflows/369223512/runs') {
@@ -70,7 +70,7 @@ test('production helper rejects a receipt redirect without following it or dispa
     const result = await (await runtime.dispatchFetch('http://fixture.local/check')).json();
     assert.equal(result.code, 'receipt_redirect_rejected');
     assert.equal(requests.length, 1);
-    assert.equal(new URL(requests[0].url).hostname, 'raw.githubusercontent.com');
+    assert.equal(new URL(requests[0].url).hostname, 'danielet087.github.io');
     assert.equal(requests[0].authorization, null);
   });
 });

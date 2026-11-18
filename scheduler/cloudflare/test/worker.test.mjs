@@ -45,7 +45,9 @@ function mockApi({ published = null, runs = [], active = {}, dispatchStatus = 20
       const replacement = await responder(url, options);
       if (replacement) return replacement;
     }
-    if (url.hostname === "raw.githubusercontent.com") {
+    if (url.hostname === "danielet087.github.io") {
+      // The published site serves the receipt; its data is not kept in Git.
+      assert.equal(url.pathname, "/game-trend-radar/data/twitch_collection_status.json");
       assert.equal(options.headers.Authorization, undefined, "never send a token to the public receipt host");
       assert.ok(url.searchParams.has("watchdog"), "avoid cached receipt");
       return published === null ? new Response("not found", { status: 404 }) : json(published);
@@ -199,14 +201,14 @@ for (const status of [403, 429, 500]) {
 }
 
 test("receipt HTTP failure blocks dispatch", async () => {
-  const api = mockApi({ responder: (url) => url.hostname === "raw.githubusercontent.com" ? new Response("failure", { status: 503 }) : undefined });
+  const api = mockApi({ responder: (url) => url.hostname === "danielet087.github.io" ? new Response("failure", { status: 503 }) : undefined });
   await assert.rejects(check(api), /receipt_http_503/);
   assert.equal(api.posts().length, 0);
 });
 
 test("receipt redirects are rejected without querying GitHub or dispatching", async () => {
   for (const status of [301, 302, 303, 307, 308]) {
-    const api = mockApi({ responder: (url) => url.hostname === "raw.githubusercontent.com"
+    const api = mockApi({ responder: (url) => url.hostname === "danielet087.github.io"
       ? new Response(null, { status, headers: { Location: "https://untrusted.invalid/receipt" } }) : undefined });
     await assert.rejects(check(api), /receipt_redirect_rejected/);
     assert.equal(api.requests.length, 1);
@@ -219,7 +221,7 @@ test("GitHub redirects cannot forward the token or lead to dispatch", async () =
     ? new Response(null, { status: 302, headers: { Location: "https://untrusted.invalid/runs" } }) : undefined });
   await assert.rejects(check(api), /github_runs_redirect_rejected/);
   assert.equal(api.posts().length, 0);
-  assert.ok(api.requests.every(({ url }) => ["api.github.com", "raw.githubusercontent.com"].includes(url.hostname)));
+  assert.ok(api.requests.every(({ url }) => ["api.github.com", "danielet087.github.io"].includes(url.hostname)));
 });
 
 test("dispatch redirects are not reported as a successful trigger", async () => {
@@ -235,7 +237,7 @@ test("null and malformed response shapes fail closed", async () => {
     await assert.rejects(check(api), /github_runs_invalid_shape/);
     assert.equal(api.posts().length, 0);
   }
-  const api = mockApi({ responder: (url) => url.hostname === "raw.githubusercontent.com" ? json(null) : undefined });
+  const api = mockApi({ responder: (url) => url.hostname === "danielet087.github.io" ? json(null) : undefined });
   await assert.rejects(check(api), /receipt_invalid_shape/);
 });
 
@@ -246,7 +248,7 @@ test("malformed active run cannot be mistaken for an empty queue", async () => {
 });
 
 test("oversized response without Content-Length fails closed", async () => {
-  const api = mockApi({ responder: (url) => url.hostname === "raw.githubusercontent.com" ? new Response(" ".repeat(16_385)) : undefined });
+  const api = mockApi({ responder: (url) => url.hostname === "danielet087.github.io" ? new Response(" ".repeat(16_385)) : undefined });
   await assert.rejects(check(api), /receipt_too_large/);
   assert.equal(api.posts().length, 0);
 });
