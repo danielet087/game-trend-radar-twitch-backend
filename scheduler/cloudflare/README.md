@@ -1,6 +1,6 @@
 # Game Trend Radar 排程控制器（Cloudflare Workers）
 
-十五項定時工作統一由既有 Cloudflare Worker 觸發，使用單一 Cron `0,5,15,17,30 * * * *`，每天 120 個 tick。每次只檢查原定 Cron 分鐘到期的工作：Twitch 每小時第 05 分檢查當小時是否缺少資料，其餘工作依下表執行。Python 與資料發布繼續在 GitHub Actions 執行；Worker 只查狀態與派發 workflow，不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
+十六項定時工作統一由既有 Cloudflare Worker 觸發，使用單一 Cron `0,5,15,17,30 * * * *`，每天 120 個 tick。每次只檢查原定 Cron 分鐘到期的工作：Twitch 每小時第 05 分檢查當小時是否缺少資料，其餘工作依下表執行。Python 與資料發布繼續在 GitHub Actions 執行；Worker 只查狀態與派發 workflow，不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
 
 ## 正式排程與設定
 
@@ -20,16 +20,17 @@
 | `storage_retention` | 每日 04:30 | `game-trend-radar-backend` | `storage-evidence-retention.yml` | — （排程派發即套用，單次上限 200 筆） |
 | `twitch_archive` | 每日 03:30 | `game-trend-radar-twitch-backend` | `archive-twitch-history.yml` | — （封存後移除已驗證的舊日檔） |
 | `credentials_frontend`／`credentials_backend`／`credentials_twitch`／`credentials_content` | 每日 05:30 | 四個儲存庫各一 | `credential-expiry.yml` | — （只記錄金鑰到期日與是否有效，不記內容） |
+| `frontend_pages` | 每小時第 30 分 | `game-trend-radar` | `pages-deploy.yml` | — （把這一小時只改 `data/**` 的 commit 一起部署上線；其他 push 仍立即部署） |
 
 IGDB（NS／NS2／PS5）的收集程式與候選資料位於獨立的 `game-trend-radar-igdb-backend`；`collect-nintendo.yml` 留在既有 Twitch 儲存庫，只負責在 runner 安全沿用現有 IGDB／Twitch 憑證並執行 IGDB 主機收集器。IGDB 主機收集使用獨立 workflow 與 concurrency，不經過 Twitch 直播或 Steam Followers 佇列。每日 08:30 重用原有 30 分 Cron tick，因此不新增 Cron，也不增加每天 120 個 tick；Cloudflare PAT 仍只需原先四個儲存庫，不必新增 IGDB 後端儲存庫權限。
 
 簡介補查使用獨立的 `steam_descriptions` workflow 與 concurrency，每六小時重用既有 30 分 Cron tick，不增加每天 120 個 tick，也不需要新的 Secret 或 PAT 儲存庫權限。它依各遊戲的簡介期限與失敗冷卻決定本輪工作；當天較早時段成功不會略過下一時段。07:30／19:30 可與內容對帳並行，發布端必須從最新前端資料合併、保留有效簡介並讓官方中文優先，沒有中文時顯示英文原文。
 
-Twitch 以外的十四個 workflow 接受 `target_slot` 與 `trigger_source=cloudflare`；`target_slot` 使用原定到期時刻的 UTC ISO 字串，包含分鐘，並且 `run-name` 須含獨立 `slot=<同一時刻>` 欄位。例如 `Steam growth | slot=2026-10-02T17:15:00Z | cloudflare`。Twitch 仍使用 UTC 整點小時作為 slot。
+Twitch 以外的十五個 workflow 接受 `target_slot` 與 `trigger_source=cloudflare`；`target_slot` 使用原定到期時刻的 UTC ISO 字串，包含分鐘，並且 `run-name` 須含獨立 `slot=<同一時刻>` 欄位。例如 `Steam growth | slot=2026-10-02T17:15:00Z | cloudflare`。Twitch 仍使用 UTC 整點小時作為 slot。
 
 正式設定如下，`wrangler.toml` 是 Git 連接及 CLI 部署時的設定來源：
 
-- `RADAR_ENABLED_JOBS = "steam_daily,steam_catchup,steam_growth,steam_content,steam_descriptions,frontend_insights,nintendo_daily,frontend_watchdog,storage_retention,twitch_archive,credentials_frontend,credentials_backend,credentials_twitch,credentials_content"`；Twitch 保持內建啟用。維護工作（2026-11-16 起加入）的 GitHub 原生 cron 只是盡力而為（每小時的 storage sync 實際每 4–6 小時才跑一次），因此改由這裡派發，原生 cron 保留作備援。
+- `RADAR_ENABLED_JOBS = "steam_daily,steam_catchup,steam_growth,steam_content,steam_descriptions,frontend_insights,nintendo_daily,frontend_watchdog,storage_retention,twitch_archive,credentials_frontend,credentials_backend,credentials_twitch,credentials_content,frontend_pages"`；Twitch 保持內建啟用。網站部署（`frontend_pages`，2026-11-18 起）沒有 GitHub 原生 cron 備援：Worker 停止時收集也一起停止；最近一次部署上線超過 3 小時，看門狗會開警示。維護工作（2026-11-16 起加入）的 GitHub 原生 cron 只是盡力而為（每小時的 storage sync 實際每 4–6 小時才跑一次），因此改由這裡派發，原生 cron 保留作備援。
 - `crons = ["0,5,15,17,30 * * * *"]`，只保留這一個 Cron。
 - 四個儲存庫的 workflow 已支援相應輸入、run-name 與既有 concurrency。每日刷新在真正重設進度前檢查 slot，避免相同時段重複重設。
 - 八種工作均不使用 GitHub 原生 `schedule`，保留 `workflow_dispatch` 與必要的 push/CI 入口；不恢復舊的一次性手動工作排程。Cloudflare 派發後仍需對照 Actions 與資料發布結果，不能只憑 Cron 存在判定收集成功。

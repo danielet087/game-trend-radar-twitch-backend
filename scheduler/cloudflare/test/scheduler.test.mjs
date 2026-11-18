@@ -80,6 +80,8 @@ test("Taiwan midnight, year boundaries and daily times produce exact UTC minute 
     ["2026-10-03T12:17:00+08:00", "frontend_watchdog", "2026-10-03T04:17:00Z"],
     ["2026-10-03T04:30:00+08:00", "storage_retention", "2026-10-02T20:30:00Z"],
     ["2026-10-03T03:30:00+08:00", "twitch_archive", "2026-10-02T19:30:00Z"],
+    ["2026-10-03T12:30:00+08:00", "frontend_pages", "2026-10-03T04:30:00Z"],
+    ["2027-01-01T00:30:00+08:00", "frontend_pages", "2026-12-31T16:30:00Z"],
   ]) assert.deepEqual(scheduledJobs(when).filter((item) => item.job_id === id), [{ job_id: id, target_slot: slot }]);
   assert.throws(() => scheduledJobs("invalid"), /invalid_clock/);
 });
@@ -93,7 +95,8 @@ test("Followers catchup is due only at Taiwan 03 through 23 inclusive", () => {
       .some((item) => item.job_id === "steam_growth"), [1, 7, 13, 19].includes(hour));
   }
   assert.deepEqual(scheduledJobs("2026-10-03T02:15:00+08:00"), []);
-  assert.deepEqual(scheduledJobs("2026-10-03T12:30:00+08:00"), []);
+  // Only the hourly site deploy uses 12:30.
+  assert.deepEqual(scheduledJobs("2026-10-03T12:30:00+08:00").map((item) => item.job_id), ["frontend_pages"]);
   assert.deepEqual(scheduledJobs("2026-10-03T12:06:00+08:00"), []);
 });
 
@@ -115,7 +118,7 @@ test("description refresh runs every six hours on the existing 30-minute tick", 
     const due = scheduledJobs(when);
     assert.equal(due.some((item) => item.job_id === "steam_descriptions"), [1, 7, 13, 19].includes(hour));
     if ([7, 19].includes(hour)) {
-      assert.deepEqual(due.map((item) => item.job_id), ["steam_content", "steam_descriptions"]);
+      assert.deepEqual(due.map((item) => item.job_id), ["steam_content", "steam_descriptions", "frontend_pages"]);
     }
   }
   for (const minute of [0, 5, 15, 17, 29, 31]) {
@@ -258,6 +261,7 @@ test("each enabled job sends only its fixed destination and exact due slot input
     ["2026-10-05T05:30:00+08:00", "credentials_backend"],
     ["2026-10-05T05:30:00+08:00", "credentials_twitch"],
     ["2026-10-05T05:30:00+08:00", "credentials_content"],
+    ["2026-10-05T12:30:00+08:00", "frontend_pages"],
   ]) {
     const api = fixture();
     assert.equal((await check(api, when, onlyJob(id))).find((item) => item.job_id === id).action, "dispatch");
@@ -417,9 +421,10 @@ test("late hourly jobs retain the original due instant within this hour", async 
   for (const [when, planned, id] of [
     ["2026-10-14T03:06:00+08:00", "2026-10-14T03:00:00+08:00", "steam_catchup"],
     ["2026-10-14T12:19:00+08:00", "2026-10-14T12:17:00+08:00", "frontend_insights"],
+    ["2026-10-14T12:34:00+08:00", "2026-10-14T12:30:00+08:00", "frontend_pages"],
   ]) {
     const api = fixture();
-    const [result] = await check(api, when, ENV, planned);
+    const [result] = await check(api, when, id === "frontend_pages" ? onlyJob(id) : ENV, planned);
     assert.equal(result.action, "dispatch");
     assert.equal(result.job_id, id);
     assert.equal(result.target_slot, iso(planned));
@@ -623,6 +628,24 @@ test("growth retries do not replace pending catchups or duplicate their own acti
   } });
   assert.equal((await check(own, "2026-11-25T07:15:00+08:00"))[0].blocking_workflow, "steam-public-growth.yml");
   assert.equal(own.posts().length, 0);
+});
+
+test("the site deploys every hour at :30 and a delivery late into the next hour is skipped", async () => {
+  for (let hour = 0; hour < 24; hour += 1) {
+    const at = (minute) => scheduledJobs(`2026-10-03T${String(hour).padStart(2, "0")}:${minute}:00+08:00`).map((item) => item.job_id);
+    assert.ok(at("30").includes("frontend_pages"));
+    for (const minute of ["00", "05", "15", "17"]) assert.ok(!at(minute).includes("frontend_pages"));
+  }
+  const api = fixture();
+  const late = await check(api, "2026-10-14T13:01:00+08:00", onlyJob("frontend_pages"), "2026-10-14T12:30:00+08:00");
+  assert.deepEqual(late.find((item) => item.job_id === "frontend_pages"),
+    { job_id: "frontend_pages", target_slot: "2026-10-14T04:30:00Z", action: "skip", reason: "stale_cron_delivery" });
+  assert.equal(api.posts().length, 0);
+  // A deploy already running (a code push) is not replaced; the next hour deploys.
+  const busy = fixture({ activeWorkflows: { "pages-deploy.yml": { in_progress: [run("2026-10-14T04:28:00Z", { status: "in_progress" })] } } });
+  const [result] = await check(busy, "2026-10-14T12:30:00+08:00", onlyJob("frontend_pages"));
+  assert.equal(result.reason, "workflow_active");
+  assert.equal(busy.posts().length, 0);
 });
 
 test("maintenance jobs run once at their own slot and never on the shared 30-minute content slots", () => {

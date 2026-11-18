@@ -298,6 +298,10 @@ export const SCHEDULE_JOBS = Object.freeze([
     minute: 30, taipeiHours: [5] },
   { id: "credentials_content", repo: "game-trend-radar-content-backend", workflow: "credential-expiry.yml", enabled: false,
     minute: 30, taipeiHours: [5] },
+  // Data commits no longer deploy the site one by one (every deploy changes each
+  // file's ETag, so browsers fetch all data again). This hourly deploy publishes
+  // everything committed since; a code push still deploys at once.
+  { id: "frontend_pages", repo: "game-trend-radar", workflow: "pages-deploy.yml", enabled: false, minute: 30 },
 ].map((job) => Object.freeze({ ...job,
   ...(job.taipeiHours ? { taipeiHours: Object.freeze(job.taipeiHours) } : {}),
   ...(job.blockingWorkflows ? { blockingWorkflows: Object.freeze(job.blockingWorkflows) } : {}),
@@ -524,7 +528,7 @@ export async function checkScheduledJobs(env, {
   // working Twitch monitor. Every network request retains timeout/redirect rules.
   const checkDue = async ({ job_id, target_slot }) => {
     if (!enabled.has(job_id)) return { job_id, target_slot, action: "skip", reason: "job_staged" };
-    const hourly = ["twitch", "steam_catchup", "frontend_insights", "frontend_watchdog"].includes(job_id);
+    const hourly = ["twitch", "steam_catchup", "frontend_insights", "frontend_watchdog", "frontend_pages"].includes(job_id);
     if (hourly ? hourSlot(epoch) !== hourSlot(scheduledEpoch) : taipeiDay(epoch) !== taipeiDay(scheduledEpoch)) {
       return { job_id, target_slot, action: "skip", reason: "stale_cron_delivery" };
     }
