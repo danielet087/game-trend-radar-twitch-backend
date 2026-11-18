@@ -24,7 +24,7 @@ function fixture({ runs = [], active = {}, activeWorkflows = {}, jobs = [], bloc
       const replacement = await responder(url, options);
       if (replacement) return replacement;
     }
-    if (url.hostname === "raw.githubusercontent.com") {
+    if (url.hostname === "danielet087.github.io") {
       assert.equal(options.headers.Authorization, undefined);
       return new Response(null, { status: 404 });
     }

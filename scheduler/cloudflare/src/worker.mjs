@@ -1,6 +1,5 @@
 // This Worker only monitors and dispatches. Python collection stays on GitHub.
 const API_ROOT = "https://api.github.com";
-const RAW_ROOT = "https://raw.githubusercontent.com";
 const ACTIVE_STATUSES = ["queued", "in_progress", "waiting", "pending", "requested"];
 const HOUR_MS = 3_600_000;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -135,8 +134,13 @@ async function fetchRuns(fetchImpl, settings, query) {
   return result;
 }
 
+// The receipt the published site serves. The site's data is built from the
+// database at each hourly deploy and is not kept in Git. At the :05 check the
+// site can hold only an earlier hour, which still decides correctly; the Twitch
+// workflow's own guard reads the database and skips an hour already collected.
+// The site must not redirect (a custom domain would): redirects are refused.
 async function readReceipt(fetchImpl, settings, now) {
-  const url = new URL(`${RAW_ROOT}/${settings.owner}/${settings.frontendRepo}/${encodeURIComponent(settings.branch)}/data/twitch_collection_status.json`);
+  const url = new URL(`https://${settings.owner}.github.io/${settings.frontendRepo}/data/twitch_collection_status.json`);
   url.searchParams.set("watchdog", String(now));
   // This public request deliberately has no Authorization header.
   const response = await request(fetchImpl, url, { headers: { Accept: "application/json", "Cache-Control": "no-cache" } }, "receipt", true);
