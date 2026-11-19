@@ -51,7 +51,7 @@ def test_application_accepts_input_store_and_collector_without_process_environme
         "release_dates_path": options.release_dates, "include_release_hints": False,
         "include_filtered_audience": True, "include_chinese_discovery": True, "include_chinese_collection": True,
         "followers_cache_path": options.followers_cache,
-        "followers_max_calls": 0, "followers_max_seconds": 0,
+        "followers_max_calls": 0, "followers_max_seconds": 0, "followers_concurrency": 1,
         "tracking_state": bundle.tracking_state, "steam_catalog": bundle.steam_catalog,
         "steam_mapping_state": bundle.steam_mapping_state,
         "steam_discovery_state": bundle.steam_discovery_state,
