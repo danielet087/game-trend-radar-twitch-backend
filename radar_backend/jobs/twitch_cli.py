@@ -6,6 +6,17 @@ from radar_backend.adapters.twitch_candidates import REGISTRY_PATH
 from radar_backend.adapters.twitch_newness import RELEASE_DATES_PATH
 from radar_backend.adapters.twitch_audience import CACHE_PATH
 from radar_backend.domain.time import validate_slot
+from radar_backend.application.twitch_audience import MAX_CONCURRENCY
+
+
+def follower_concurrency(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer") from None
+    if not 1 <= number <= MAX_CONCURRENCY:
+        raise argparse.ArgumentTypeError(f"must be from 1 to {MAX_CONCURRENCY}")
+    return number
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Optional diagnostic follower request cap; default: no separate cap")
     parser.add_argument("--followers-max-seconds", type=float, default=None,
                         help="Optional diagnostic follower time cap; default: collection deadline only")
+    parser.add_argument("--followers-concurrency", type=follower_concurrency, default=1,
+                        help="Parallel follower lookups (1-8); request starts stay globally spaced")
     parser.add_argument("--no-filtered-audience", action="store_true", help="Disable follower-qualified statistics (CLI default: enabled)")
     parser.add_argument("--target-slot", type=validate_slot, default=None,
                         help="Requested UTC hour; actual sampling timestamps remain separate")

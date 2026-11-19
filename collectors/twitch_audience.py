@@ -11,6 +11,7 @@ from pathlib import Path
 from statistics import median
 import tempfile
 import time
+from types import SimpleNamespace
 from typing import Callable
 
 import requests
@@ -31,6 +32,18 @@ MIN_FOLLOWERS = _rules.MIN_FOLLOWERS
 MIN_VIEWERS = _rules.MIN_VIEWERS
 
 
+def _worker_client(shared: TwitchClient) -> SimpleNamespace:
+    """A parallel follower worker gets its own HTTP session and the shared app token."""
+    session = requests.Session()
+    return SimpleNamespace(
+        session=session,
+        client_id=shared.client_id,
+        access_token=shared.access_token,
+        timeout_seconds=shared.timeout_seconds,
+        close=session.close,
+    )
+
+
 def _fresh_record(row: object, now: datetime) -> dict | None:
     return _rules._fresh_record(
         row, now, parse_timestamp=parse_timestamp, timestamp=timestamp, max_age=MAX_AGE
@@ -46,6 +59,8 @@ class FollowerResolver(_application.FollowerResolver):
         max_calls: int | None = None,
         max_seconds: float | None = None,
         collection_deadline: float | None = None,
+        concurrency: int = 1,
+        parallel_start_spacing: float = _application.PARALLEL_START_SPACING,
         utcnow: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -56,6 +71,9 @@ class FollowerResolver(_application.FollowerResolver):
             max_calls=max_calls,
             max_seconds=max_seconds,
             collection_deadline=collection_deadline,
+            concurrency=concurrency,
+            worker_client=lambda shared: _worker_client(shared),
+            parallel_start_spacing=parallel_start_spacing,
             utcnow=utcnow or (lambda: datetime.now(timezone.utc)),
             monotonic=monotonic,
             sleep=sleep,
@@ -118,4 +136,5 @@ def attach_filtered_audience(
         filtered_metrics=lambda *args: filtered_metrics(*args),
         info=lambda *args: LOGGER.info(*args),
         rule=lambda: RULE,
+        lookup_order=lambda channels: _application.lookup_order(channels, min_viewers=MIN_VIEWERS),
     )

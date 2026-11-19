@@ -25,6 +25,7 @@ class CollectionRequest:
     no_filtered_audience: bool
     target_slot: str | None
     trigger_source: str
+    followers_concurrency: int = 1
 
 
 @dataclass(frozen=True)

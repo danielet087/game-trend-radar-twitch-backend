@@ -134,6 +134,7 @@ def collect_candidates(
     followers_cache_path: str | Path,
     followers_max_calls: int | None,
     followers_max_seconds: float | None,
+    followers_concurrency: int = 1,
     max_collection_seconds: float,
     monotonic: Callable[[], float],
     tracking_state: dict | None,
@@ -629,6 +630,7 @@ def collect_candidates(
             max_calls=followers_max_calls,
             max_seconds=followers_max_seconds,
             collection_deadline=deadline,
+            concurrency=followers_concurrency,
             monotonic=monotonic,
             utcnow=(lambda: now) if now else None,
         )

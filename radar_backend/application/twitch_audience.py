@@ -2,7 +2,24 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 from radar_backend.domain.twitch_audience import chinese_channels
+
+MAX_CONCURRENCY = 8
+# Parallel lookups space request starts globally: at most 6.25 requests per
+# second (375 per minute), under half of Twitch's 800-point app bucket.
+PARALLEL_START_SPACING = 0.16
+
+
+def lookup_order(channels: list[dict], *, min_viewers: int) -> list[str]:
+    """Broadcasters filtered_metrics() resolves, in the same order."""
+    return [
+        str(stream["user_id"])
+        for stream in sorted(channels, key=lambda row: (-row["viewer_count"], str(row["user_id"])))
+        if stream["viewer_count"] >= min_viewers
+    ]
 
 
 class FollowerResolver:
@@ -16,6 +33,9 @@ class FollowerResolver:
         max_calls: int | None = None,
         max_seconds: float | None = None,
         collection_deadline: float | None = None,
+        concurrency: int = 1,
+        worker_client=None,
+        parallel_start_spacing: float = PARALLEL_START_SPACING,
         utcnow,
         monotonic,
         sleep,
@@ -37,9 +57,20 @@ class FollowerResolver:
             raise ValueError("Optional follower time budget must be positive and finite")
         if collection_deadline is not None and (not math_module().isfinite(collection_deadline)):
             raise ValueError("Collection deadline must be finite")
+        if type(concurrency) is not int or not 1 <= concurrency <= MAX_CONCURRENCY:
+            raise ValueError(f"Follower lookup concurrency must be an integer from 1 to {MAX_CONCURRENCY}")
+        if not math_module().isfinite(parallel_start_spacing) or parallel_start_spacing < 0:
+            raise ValueError("Parallel start spacing must be finite and non-negative")
+        self.parallel_start_spacing = parallel_start_spacing
         self.client, self.cache_path = (client, path_type(cache_path))
         self.max_calls, self.max_seconds = (max_calls, max_seconds)
         self.collection_deadline = collection_deadline
+        self.concurrency = concurrency
+        # A worker client gets its own HTTP session; the default shares the client.
+        self.worker_client = worker_client or (lambda shared: shared)
+        self._lock = threading.Lock()
+        self._local = threading.local()
+        self._next_start = float("-inf")
         self.utcnow = utcnow
         self.monotonic, self.sleep = (monotonic, sleep)
         self.load_cache, self.save_cache = load_cache, save_cache
@@ -146,6 +177,119 @@ class FollowerResolver:
         finally:
             self.client._last_request_at = self.monotonic()
 
+    def needs_lookup(self, user_id) -> bool:
+        """Whether resolve() would have to ask Twitch for this broadcaster now."""
+        if not isinstance(user_id, str) or not user_id.isascii() or not user_id.isdigit():
+            return False
+        if user_id in self.results:
+            return False
+        return self.fresh_record(self.cache.get(user_id), self.utcnow()) is None
+
+    def prefetch(self, user_ids) -> int:
+        """Look up uncached broadcasters in order with bounded parallel requests.
+
+        A sequential resolver does nothing here and resolve() works as before.
+        Results land in the shared cache and results, so the later resolve()
+        calls return them without another request. Budgets, the shared
+        collection deadline and the stop reasons hold across all workers.
+        """
+        if self.concurrency <= 1 or self.stop_reason:
+            return 0
+        pending = [user_id for user_id in dict.fromkeys(user_ids) if self.needs_lookup(user_id)]
+        if not pending:
+            return 0
+        clients = []
+
+        def start_worker():
+            client = self.worker_client(self.client)
+            with self._lock:
+                clients.append(client)
+            self._local.client = client
+
+        try:
+            with ThreadPoolExecutor(
+                max_workers=min(self.concurrency, len(pending)),
+                thread_name_prefix="followers",
+                initializer=start_worker,
+            ) as pool:
+                for _ in pool.map(self._fetch_in_worker, pending):
+                    pass
+        finally:
+            for client in clients:
+                close = getattr(client, "close", None)
+                if client is not self.client and callable(close):
+                    close()
+        return len(pending)
+
+    def _may_request(self, user_id: str) -> bool:
+        """Budget checks shared by all workers; call with the lock held."""
+        if self.stop_reason or user_id in self.results:
+            return False
+        if self.max_calls is not None and self.calls >= self.max_calls:
+            self.stop_reason = "call_budget_exhausted"
+            return False
+        remaining, deadline_reason = self.remaining()
+        if remaining <= 0:
+            self.stop_reason = deadline_reason
+            return False
+        if not self.client.access_token:
+            self.stop_reason = "app_token_unavailable"
+            return False
+        return True
+
+    def _fetch_in_worker(self, user_id: str) -> None:
+        with self._lock:
+            if not self._may_request(user_id):
+                return
+            remaining, deadline_reason = self.remaining()
+            now = self.monotonic()
+            start = max(now, self._next_start)
+            self._next_start = start + self.parallel_start_spacing
+            wait = start - now
+            if wait >= remaining:
+                self.stop_reason = deadline_reason
+                return
+        if wait > 0:
+            self.sleep(wait)
+        with self._lock:
+            if not self._may_request(user_id):
+                return
+            remaining = self.remaining()[0]
+            self.cache.pop(user_id, None)
+            self.results[user_id] = None
+            self.calls += 1
+        status = None
+        try:
+            response = self.request(getattr(self._local, "client", self.client), user_id, remaining)
+            status = response.status_code
+            response.raise_for_status()
+            payload = response.json()
+            total = payload.get("total") if isinstance(payload, dict) else None
+            if type(total) is not int or total < 0:
+                raise ValueError("Invalid follower total")
+        except (self.request_exception(), ValueError, TypeError):
+            with self._lock:
+                self.failures += 1
+                self.consecutive_failures += 1
+                if not self.stop_reason:
+                    remaining, deadline_reason = self.remaining()
+                    if remaining <= 0:
+                        self.stop_reason = deadline_reason
+                    elif status == 429:
+                        self.stop_reason = "rate_limited"
+                    elif status in {401, 403}:
+                        self.stop_reason = "authorization_unavailable"
+                    elif self.consecutive_failures >= 3:
+                        self.stop_reason = "repeated_lookup_failures"
+            return
+        with self._lock:
+            self.cache[user_id] = {"total": total, "observed_at": self.timestamp(self.utcnow())}
+            self.results[user_id] = total
+            self.consecutive_failures = 0
+            self.successes += 1
+            if self.successes % 50 == 0:
+                self.checkpoints_saved += int(self.save())
+
     def save(self) -> bool:
         """Persist fresh successes through the atomic cache port."""
         now = self.utcnow()
@@ -186,6 +330,7 @@ def attach_filtered_audience(
     filtered_metrics,
     info,
     rule,
+    lookup_order=None,
 ) -> dict:
     class SharedFollowers:
         """Resolve a broadcaster once for both populations in this census."""
@@ -197,8 +342,26 @@ def attach_filtered_audience(
                 self.totals[user_id] = resolver.resolve(user_id)
             return self.totals[user_id]
 
+    ordered = sorted(candidates, key=priority)
     try:
-        for index, row in enumerate(sorted(candidates, key=priority), 1):
+        if lookup_order is not None and getattr(resolver, "concurrency", 1) > 1:
+            # Same order as the sequential pass: categories by priority, then viewers.
+            user_ids = []
+            for row in ordered:
+                user_ids.extend(lookup_order(channels_by_game[row["game_id"]]))
+                if regional_channels_by_game is not None and row["game_id"] in regional_channels_by_game:
+                    user_ids.extend(lookup_order(regional_channels_by_game[row["game_id"]]))
+            started = resolver.monotonic()
+            queued = resolver.prefetch(user_ids)
+            info(
+                "Follower prefetch: %d broadcasters queued, %d parallel requests; %d lookups in %.1fs%s",
+                queued,
+                resolver.concurrency,
+                resolver.calls,
+                resolver.monotonic() - started,
+                f"; stopped: {resolver.stop_reason}" if resolver.stop_reason else "",
+            )
+        for index, row in enumerate(ordered, 1):
             shared = SharedFollowers()
             game_id = row["game_id"]
             global_channels = channels_by_game[game_id]
@@ -238,6 +401,7 @@ def attach_filtered_audience(
         "unknown_unique_broadcasters": sum(total is None for total in resolver.results.values()),
         "max_lookup_calls": resolver.max_calls,
         "max_lookup_seconds": resolver.max_seconds,
+        "lookup_concurrency": getattr(resolver, "concurrency", 1),
         "lookup_elapsed_seconds": round(resolver.monotonic() - resolver.started, 3),
         "cache_checkpoints_saved": resolver.checkpoints_saved,
         "stop_reason": resolver.stop_reason

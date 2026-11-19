@@ -43,7 +43,8 @@ def report_collection(payload: dict, args: CollectionRequest, path: Path, *, sum
         print(f"Collection elapsed {payload['coverage']['collection_elapsed_seconds']:.1f}s / "
               f"{args.max_collection_seconds:g}s overall deadline. "
               f"Follower request cap: {args.followers_max_calls if args.followers_max_calls is not None else 'none'}; "
-              f"separate follower time cap: {args.followers_max_seconds if args.followers_max_seconds is not None else 'none'}.")
+              f"separate follower time cap: {args.followers_max_seconds if args.followers_max_seconds is not None else 'none'}; "
+              f"parallel follower lookups: {getattr(args, 'followers_concurrency', 1)}.")
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as summary:
             summary.write(
@@ -89,7 +90,7 @@ def report_collection(payload: dict, args: CollectionRequest, path: Path, *, sum
                     f"- 完整分類：{audience['complete_categories']}；待補齊分類：{audience['partial_categories']}\n"
                     f"- 追隨數 API 查詢：{audience['follower_lookup_calls']}；24 小時內快取命中：{audience['follower_cache_hits']}\n"
                     f"- 追隨數查詢失敗：{audience['follower_lookup_failures']}；停止原因：{audience['stop_reason']}\n"
-                    f"- 追隨數額外查詢上限：{args.followers_max_calls if args.followers_max_calls is not None else '無'}；額外時間上限：{args.followers_max_seconds if args.followers_max_seconds is not None else '無'}\n"
+                    f"- 追隨數額外查詢上限：{args.followers_max_calls if args.followers_max_calls is not None else '無'}；額外時間上限：{args.followers_max_seconds if args.followers_max_seconds is not None else '無'}；同時查詢：{getattr(args, 'followers_concurrency', 1)} 筆\n"
                     f"- 快取保存：{'成功' if audience['cache_saved'] else '失敗'}\n\n"
                     "任何 ≥10 觀眾的頻道追隨數未知時，該分類中位數暫不提供，避免使用偏差的部分樣本。\n"
                     "合格樣本為零時中位數也是空值；未知與空樣本皆不填 0。\n"

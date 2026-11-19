@@ -122,7 +122,7 @@ jobs:
         # job for setup, cache save and publication. No separate follower cap.
         # A launch-day category can exceed 15,000 live streams (Grand Theft Auto VI
         # on 2026-11-19), so allow 800 stream pages per category and 2,400 calls.
-        run: python -m scripts.update_twitch --min-viewers 7000 --max-collection-seconds 1500 --max-stream-pages 800 --max-api-calls 2400 --target-slot "$TARGET_SLOT" --trigger-source "$TRIGGER_SOURCE" --tracking-state output/twitch_tracking_input.json --steam-catalog output/steam_catalog_input.json --steam-mapping output/twitch_steam_mapping_input.json --steam-discovery output/twitch_steam_discovery_input.json --output output/twitch_live.json
+        run: python -m scripts.update_twitch --min-viewers 7000 --max-collection-seconds 1500 --max-stream-pages 800 --max-api-calls 2400 --followers-concurrency 4 --followers-max-seconds 900 --target-slot "$TARGET_SLOT" --trigger-source "$TRIGGER_SOURCE" --tracking-state output/twitch_tracking_input.json --steam-catalog output/steam_catalog_input.json --steam-mapping output/twitch_steam_mapping_input.json --steam-discovery output/twitch_steam_discovery_input.json --output output/twitch_live.json
       - name: Save legacy follower lookup progress
         if: always() && steps.guard.outputs.should_collect == 'true' && vars.RADAR_DATABASE_PRIMARY != '1' && hashFiles('.cache/twitch_followers.json') != ''
         continue-on-error: true

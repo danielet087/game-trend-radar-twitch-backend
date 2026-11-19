@@ -46,6 +46,7 @@ def collect_observations(
         followers_cache_path=request.followers_cache,
         followers_max_calls=request.followers_max_calls,
         followers_max_seconds=request.followers_max_seconds,
+        followers_concurrency=request.followers_concurrency,
         tracking_state=inputs.tracking_state,
         steam_catalog=inputs.steam_catalog,
         steam_mapping_state=inputs.steam_mapping_state,
