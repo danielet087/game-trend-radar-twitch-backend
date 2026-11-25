@@ -21,11 +21,11 @@ def test_regional_census_uses_latest_deduplicated_broadcast_language():
     ])
     result = category_metrics(PageReader(client, 10), '1')
     assert (result['viewer_count'], result['streamer_count']) == (1850, 5)
-    assert result['streamer_counts_above_viewers'] == [4, 3, 3]
+    assert result['streamer_counts_above_viewers'] == [4, 3, 3, 3]
     assert result['audience_regions']['zh'] == {
         'viewer_count': 200, 'streamer_count': 2, 'median_viewer_count': 100,
         'largest_stream_viewer_count': 200,
-        'streamer_counts_above_viewers': [1, 1, 1],
+        'streamer_counts_above_viewers': [1, 1, 1, 1],
     }
     assert '"user_id"' not in json.dumps(result)
 
@@ -103,15 +103,34 @@ def test_candidate_and_tracked_regions_must_agree(tmp_path):
 
 
 def test_viewer_tier_boundaries_and_impossible_counts(tmp_path):
-    values = [0, 30, 31, 50, 51, 100, 101]
+    values = [0, 30, 31, 50, 51, 60, 61, 100, 101]
     client = FakeClient([('streams', page([stream(1, i, viewers) for i, viewers in enumerate(values, 1)]))])
     row = category_metrics(PageReader(client, 10), '1')
-    assert row['streamer_counts_above_viewers'] == [5, 3, 1]
-    assert row['audience_regions']['zh']['streamer_counts_above_viewers'] == [5, 3, 1]
+    assert row['streamer_counts_above_viewers'] == [7, 5, 3, 1]
+    assert row['audience_regions']['zh']['streamer_counts_above_viewers'] == [7, 5, 3, 1]
 
     payload = regional_snapshot()
     row = payload['tracked_games'][0]
     row['streamer_counts_above_viewers'] = [1, 1, 0]
     row['audience_regions']['zh']['streamer_counts_above_viewers'] = [1, 0, 0]
+    with pytest.raises(ValueError, match='Chinese viewer tiers'):
+        store_snapshot(payload, tmp_path)
+
+
+def test_hours_saved_with_three_tiers_stay_valid_beside_the_60_viewer_tier(tmp_path):
+    payload = regional_snapshot()
+    row = payload['tracked_games'][0]
+    row['streamer_counts_above_viewers'] = [2, 1, 0, 0]
+    row['audience_regions']['zh']['streamer_counts_above_viewers'] = [1, 0, 0, 0]
+    store_snapshot(payload, tmp_path)
+    # Hours saved before the 60-viewer tier keep their three counts.
+    row['streamer_counts_above_viewers'] = [2, 1, 0]
+    row['audience_regions']['zh']['streamer_counts_above_viewers'] = [1, 0, 0]
+    store_snapshot(payload, tmp_path)
+    # Both regions of one hour use the same tiers.
+    row['audience_regions']['zh']['streamer_counts_above_viewers'] = [1, 0, 0, 0]
+    with pytest.raises(ValueError, match='Chinese viewer tiers'):
+        store_snapshot(payload, tmp_path)
+    row['audience_regions']['zh']['streamer_counts_above_viewers'] = [1, 0]
     with pytest.raises(ValueError, match='Chinese viewer tiers'):
         store_snapshot(payload, tmp_path)
