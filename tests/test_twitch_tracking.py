@@ -77,7 +77,7 @@ def test_known_thirty_day_boundary_expires_without_any_live_request(tmp_path):
     assert len(client.calls) == 1
 
 
-def test_unknown_release_stays_active_until_date_can_be_resolved(tmp_path):
+def test_unknown_release_is_followed_for_thirty_days_from_admission(tmp_path):
     state = initial_state()
     entry = state["games"]["1"]
     entry.update(release_at=None, expires_at=None, release_source=None)
@@ -86,7 +86,8 @@ def test_unknown_release_stays_active_until_date_can_be_resolved(tmp_path):
     client = FakeClient([("games/top", page([])), ("games", page([])), ("streams", page([]))])
     result = run(tmp_path, client, state)
     assert result["tracking_state"]["games"]["1"]["status"] == "active"
-    assert result["tracked_games"][0]["tracking"]["status_reason"] == "awaiting_release_date"
+    assert result["tracked_games"][0]["tracking"]["status_reason"] == "twitch_viewers"
+    assert result["tracking_state"]["games"]["1"]["expires_at"] == timestamp(NOW + timedelta(days=29))
 
 
 def test_metadata_failure_keeps_cached_release_and_unknown_never_becomes_zero(tmp_path, monkeypatch):

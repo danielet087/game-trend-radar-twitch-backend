@@ -10,6 +10,7 @@ from radar_backend.domain import twitch_tracking as rules
 
 TRACKING_DAYS = 30
 STATUSES = {"active", "expired", "excluded"}
+awaiting_launch = rules.awaiting_launch
 
 
 def _sources(entry: dict) -> dict:
@@ -47,6 +48,8 @@ def reconcile_tracking_entry(
     *,
     release_at: str | None = None,
     release_source: str | None = None,
+    release_precision: str | None = None,
+    launches: dict | None = None,
     non_game_ids=(),
 ) -> dict:
     return rules.reconcile_tracking_entry(
@@ -54,6 +57,8 @@ def reconcile_tracking_entry(
         now,
         release_at=release_at,
         release_source=release_source,
+        release_precision=release_precision,
+        launches=launches,
         non_game_ids=non_game_ids,
         deepcopy_fn=deepcopy,
         timestamp_fn=timestamp,
@@ -132,6 +137,7 @@ def enroll_observation(
     eligibility_at: datetime | None = None,
     allow_twitch_enrollment: bool = True,
     chinese_discovery: bool = False,
+    revival: bool = False,
 ) -> dict | None:
     """Add qualified Twitch membership, then store one real census observation."""
     return rules.enroll_observation(
@@ -143,6 +149,10 @@ def enroll_observation(
         eligibility_at=eligibility_at,
         allow_twitch_enrollment=allow_twitch_enrollment,
         chinese_discovery=chinese_discovery,
+        revival=revival,
+        record_hit_fn=lambda entry, at: rules.record_hit(
+            entry, at, sources_fn=_sources, parse_timestamp_fn=parse_timestamp,
+            timestamp_fn=timestamp, timedelta_type=timedelta),
         deepcopy_fn=deepcopy,
         timestamp_fn=timestamp,
         sources_fn=_sources,

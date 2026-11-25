@@ -288,9 +288,11 @@ def test_canonical_frontend_input_transport_pins_all_blobs_to_one_head(tmp_path,
         == {"schema_version": 1, "updated_at": None, "games": {}}
     )
     assert len([row for row in trace if row[0] == "head"]) == 1
+    # Store facts (optional: absent here) are read from the same revision.
     assert [row[1].split(COMMIT + "/", 1)[1] for row in trace if row[0] == "blob"] == [
         frontend_inputs.TRACKING_PATH,
         frontend_inputs.STEAM_PATH,
+        "data/store_facts.json",
         frontend_inputs.MAPPING_PATH,
         frontend_inputs.DISCOVERY_PATH,
     ]

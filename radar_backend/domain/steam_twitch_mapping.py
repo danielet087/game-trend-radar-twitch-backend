@@ -111,6 +111,39 @@ def normalize_mapping_state(
     return state
 
 
+STORE_FACTS_PATH = "data/store_facts.json"
+
+
+def early_access_record(value, *, parse_timestamp=parse_timestamp) -> dict | None:
+    """A store-facts Early Access record, or None when absent or malformed."""
+    if not isinstance(value, dict) or set(value) != {"active", "started_at", "full_release_at"}:
+        return None
+    if type(value["active"]) is not bool:
+        return None
+    for field in ("started_at", "full_release_at"):
+        if value[field] is not None:
+            try:
+                parse_timestamp(value[field])
+            except (ValueError, TypeError):
+                return None
+    return dict(value)
+
+
+def attach_early_access(catalog: dict, store_facts) -> dict:
+    """Copy each game's Early Access record from data/store_facts.json onto the
+    catalog rows. Unreadable facts leave the catalog as it was."""
+    games = store_facts.get("games") if isinstance(store_facts, dict) else None
+    if not isinstance(games, dict) or not isinstance(catalog, dict) or not isinstance(catalog.get("games"), list):
+        return catalog
+    for row in catalog["games"]:
+        if isinstance(row, dict):
+            facts = games.get(str(row.get("appid")))
+            record = early_access_record(facts.get("early_access")) if isinstance(facts, dict) else None
+            if record:
+                row["early_access"] = record
+    return catalog
+
+
 def normalize_steam_catalog(
     payload: dict,
     now: datetime,
@@ -236,6 +269,8 @@ def normalize_steam_catalog(
                 "genres": genres,
                 "tag_labels_zh_tw": _labels(row.get("tag_labels_zh_tw"), tags),
                 "genre_labels_zh_tw": _labels(row.get("genre_labels_zh_tw"), genres),
+                **({"early_access": early_access_record(row["early_access"])}
+                   if early_access_record(row.get("early_access")) else {}),
                 **(
                     {
                         key: deepcopy(row.get(key))

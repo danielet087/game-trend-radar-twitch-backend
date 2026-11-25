@@ -173,8 +173,18 @@ def test_unknown_twitch_release_survives_steam_expiry(owner):
     state = populated(owner)
     entry = owner.enroll_steam_mapping(state, steam_mapping(release=NOW - timedelta(days=29)), NOW)
     assert owner.reconcile_tracking_entry(entry, NOW + timedelta(days=1)) is entry
-    assert entry["status"] == "active" and entry["expires_at"] is None
+    # With no date, the Twitch admission keeps the game for 30 days.
+    assert entry["status"] == "active" and entry["expires_at"] == timestamp(NOW + timedelta(days=30))
     assert entry["tracking_sources"]["steam:100"]["status"] == "expired"
+    # Then it waits for a launch; the threshold brings it back.
+    owner.reconcile_tracking_entry(entry, NOW + timedelta(days=31))
+    assert (entry["status"], entry["status_reason"]) == ("expired", "awaiting_launch")
+    later = NOW + timedelta(days=40)
+    row = observation(at=later)
+    row["verification"] = {"status": "pending"}
+    assert owner.enroll_observation(state, row, later, revival=True) is entry
+    assert entry["status"] == "active" and entry["status_reason"] == "twitch_viewers"
+    assert entry["expires_at"] == timestamp(later + timedelta(days=30))
 
 
 @pytest.mark.parametrize("explicit", [False, True])

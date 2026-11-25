@@ -87,6 +87,52 @@ def census_metrics(channels, *, counter_type, median_fn):
     }
 
 
+# IGDB's date formats (release_dates.date_format, or the older category code).
+DATE_FORMATS = {0: "YYYYMMMMDD", 1: "YYYYMMMM", 2: "YYYY", 3: "YYYYQ1",
+                4: "YYYYQ2", 5: "YYYYQ3", 6: "YYYYQ4", 7: "TBD"}
+DATE_PRECISION = {"YYYYMMMMDD": "day", "YYYYMMDD": "day", "YYYYMMMM": "month", "YYYYMM": "month",
+                  "YYYYQ1": "quarter", "YYYYQ2": "quarter", "YYYYQ3": "quarter", "YYYYQ4": "quarter",
+                  "YYYY": "year", "TBD": "unknown"}
+
+
+def release_date_details(row, *, datetime_type, timezone_type, timestamp):
+    """How exactly IGDB knows the first release date, and its exact Early
+    Access and full release dates.
+
+    IGDB stores "2027" as 2027-12-31 and a quarter as its last day; those
+    are not launch days. Without release dates the precision stays unknown
+    (None), as before IGDB precision was read.
+    """
+    rows = row.get("release_dates")
+    if not isinstance(rows, list):
+        return None, None, None
+    first = row.get("first_release_date")
+    precisions, early, full = set(), [], []
+    for item in rows:
+        if not isinstance(item, dict) or type(item.get("date")) not in (int, float):
+            continue
+        shape = item.get("date_format")
+        name = shape.get("format") if isinstance(shape, dict) else None
+        if not name and type(item.get("category")) is int:
+            name = DATE_FORMATS.get(item["category"])
+        precision = DATE_PRECISION.get(str(name or "").upper().replace(" ", ""), "unknown")
+        if item["date"] == first:
+            precisions.add(precision)
+        status = item.get("status")
+        status = str(status.get("name") if isinstance(status, dict) else "").strip().casefold()
+        if precision == "day" and status == "early access":
+            early.append(item["date"])
+        elif precision == "day" and status == "full release":
+            full.append(item["date"])
+
+    def moment(values):
+        return timestamp(datetime_type.fromtimestamp(min(values), timezone_type.utc)) if values else None
+
+    first_precision = next((name for name in ("day", "month", "quarter", "year", "unknown") if name in precisions),
+                           None)
+    return first_precision, moment(early), moment(full)
+
+
 def apply_release_hint_rows(
     rows,
     now,
@@ -107,6 +153,8 @@ def apply_release_hint_rows(
             if type(raw_date) in (int, float)
             else None
         )
+        precision, early_access_at, full_release_at = release_date_details(
+            row, datetime_type=datetime_type, timezone_type=timezone_type, timestamp=timestamp)
         age = now - date if date else None
         window = timedelta_type(days=source_rules["igdb_first_release_date"]["window_days"])
         band = (
@@ -125,4 +173,7 @@ def apply_release_hint_rows(
             "release_band": band,
             "confirms_twitch_new_badge": False,
         }
+        if precision is not None:
+            hints[str(row["id"])].update(release_precision=precision, early_access_at=early_access_at,
+                                         full_release_at=full_release_at)
 

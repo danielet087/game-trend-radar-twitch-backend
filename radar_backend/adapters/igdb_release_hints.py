@@ -33,7 +33,8 @@ def release_hints(
     hints = {}
     for offset in range(0, len(ids), 100):
         query = (
-            "fields id,name,first_release_date; where id = ("
+            "fields id,name,first_release_date,release_dates.date,release_dates.date_format.format,"
+            "release_dates.category,release_dates.status.name; where id = ("
             + ",".join(ids[offset : offset + 100])
             + "); limit 100;"
         )

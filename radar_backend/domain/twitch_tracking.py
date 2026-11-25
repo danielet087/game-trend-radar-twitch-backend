@@ -13,6 +13,144 @@ TRACKING_DAYS = 30
 # streams from deluxe-edition early access or early keys are on record.
 PRE_RELEASE_DAYS = 14
 STATUSES = {"active", "expired", "excluded"}
+# Every launch is followed on its own: an Early Access start and the full
+# release that may come years later each get PRE_RELEASE_DAYS before to
+# TRACKING_DAYS after. Between launches nothing is recorded, except that a
+# Twitch audience of the admission threshold outside the Twitch source's own
+# launch windows (a demo, a beta, a game waiting for its full release, a game
+# with no known date) keeps the game for HIT_DAYS after its latest such hour.
+HIT_DAYS = 30
+# An ended game is waiting for a launch under these reasons; reaching the
+# viewer threshold again brings it back without fresh newness evidence.
+AWAITING_REASONS = {"awaiting_full_release", "awaiting_launch", "steam_not_released"}
+TIME_FIELDS = ("first_seen_at", "last_seen_at", "updated_at", "release_at", "expires_at",
+               "resumes_at", "hit_started_at", "hit_until")
+
+
+def _moment(value, parse_timestamp_fn=None):
+    parse_timestamp_fn = parse_timestamp if parse_timestamp_fn is None else parse_timestamp_fn
+    if not value:
+        return None
+    try:
+        return parse_timestamp_fn(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def launch_times(key: str, source: dict, *, parse_timestamp_fn=None) -> list[datetime]:
+    """The exact launches one source knows: its release, an Early Access start
+    and the full release after it. IGDB dates count only when known to the day."""
+    found = []
+    released = _moment(source.get("release_at"), parse_timestamp_fn)
+    if key.startswith("steam:"):
+        if released:
+            found.append(released)
+        access = source.get("early_access") if isinstance(source.get("early_access"), dict) else {}
+        found += [_moment(access.get(field), parse_timestamp_fn) for field in ("started_at", "full_release_at")]
+    else:
+        # Records from before precision was kept were taken as exact.
+        if released and source.get("release_precision", "day") == "day":
+            found.append(released)
+        dates = source.get("launches") if isinstance(source.get("launches"), dict) else {}
+        found += [_moment(dates.get(field), parse_timestamp_fn) for field in ("early_access_at", "full_release_at")]
+    return sorted({moment for moment in found if moment})
+
+
+def launch_windows(entry: dict, *, sources_fn=None, parse_timestamp_fn=None, timedelta_type=None,
+                   tracking_days=None, pre_release_days=None) -> list[tuple]:
+    """(start, end, launch, source key) for each launch of each source."""
+    sources_fn = _sources if sources_fn is None else sources_fn
+    timedelta_type = timedelta if timedelta_type is None else timedelta_type
+    tracking_days = TRACKING_DAYS if tracking_days is None else tracking_days
+    pre_release_days = PRE_RELEASE_DAYS if pre_release_days is None else pre_release_days
+    windows = []
+    for key, source in sources_fn(entry).items():
+        if not isinstance(source, dict) or source.get("status") == "excluded":
+            continue
+        for launch in launch_times(key, source, parse_timestamp_fn=parse_timestamp_fn):
+            windows.append((launch - timedelta_type(days=pre_release_days),
+                            launch + timedelta_type(days=tracking_days), launch, key))
+    return windows
+
+
+def hit_counts(sources: dict, at: datetime, *, parse_timestamp_fn=None, timedelta_type=None,
+               tracking_days=None, pre_release_days=None) -> bool:
+    """Does a threshold audience at ``at`` keep the game on its own?
+
+    Inside a launch window of the Twitch source the launch decides. Outside
+    one it counts before a known launch (a demo, a beta), with no exact date,
+    or while the game waits for a launch (Early Access before the full
+    release); after its launches have passed it does not.
+    """
+    timedelta_type = timedelta if timedelta_type is None else timedelta_type
+    tracking_days = TRACKING_DAYS if tracking_days is None else tracking_days
+    pre_release_days = PRE_RELEASE_DAYS if pre_release_days is None else pre_release_days
+    twitch = sources.get("twitch_new") if isinstance(sources.get("twitch_new"), dict) else {}
+    launches = launch_times("twitch_new", twitch, parse_timestamp_fn=parse_timestamp_fn)
+    if any(launch - timedelta_type(days=pre_release_days) <= at < launch + timedelta_type(days=tracking_days)
+           for launch in launches):
+        return False
+    if not launches or any(at < launch for launch in launches):
+        return True
+    return any(
+        isinstance(source, dict) and source.get("status") != "excluded"
+        and _awaiting(key, source, launch_times(key, source, parse_timestamp_fn=parse_timestamp_fn), at,
+                      parse_timestamp_fn=parse_timestamp_fn, timedelta_type=timedelta_type,
+                      tracking_days=tracking_days)
+        for key, source in sources.items()
+    )
+
+
+def hit_windows(source: dict, sources: dict, *, parse_timestamp_fn=None, timedelta_type=None,
+                hit_days=None) -> list[tuple]:
+    """The viewer-threshold windows of the Twitch source: its admission, when
+    that counted on its own, and its latest recorded hits."""
+    timedelta_type = timedelta if timedelta_type is None else timedelta_type
+    hit_days = HIT_DAYS if hit_days is None else hit_days
+    windows = []
+    observed = _moment((source.get("enrollment") or {}).get("observed_at"), parse_timestamp_fn)
+    if observed and hit_counts(sources, observed, parse_timestamp_fn=parse_timestamp_fn,
+                               timedelta_type=timedelta_type):
+        windows.append((observed, observed + timedelta_type(days=hit_days)))
+    start = _moment(source.get("hit_started_at"), parse_timestamp_fn)
+    until = _moment(source.get("hit_until"), parse_timestamp_fn)
+    if start and until and start < until:
+        windows.append((start, until))
+    return windows
+
+
+def _union(windows: list[tuple]) -> list[list]:
+    merged = []
+    for start, end in sorted((window[0], window[1]) for window in windows):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def _igdb_early_access(source: dict) -> bool:
+    dates = source.get("launches") if isinstance(source.get("launches"), dict) else {}
+    return bool(dates.get("early_access_at")) and not dates.get("full_release_at")
+
+
+def _awaiting(key: str, source: dict, launches: list[datetime], now: datetime, *,
+              parse_timestamp_fn=None, timedelta_type=None, tracking_days=None) -> bool:
+    """Is a launch of this source still to come (known or not)?"""
+    timedelta_type = timedelta if timedelta_type is None else timedelta_type
+    tracking_days = TRACKING_DAYS if tracking_days is None else tracking_days
+    if any(now < launch for launch in launches):
+        return True
+    if key.startswith("steam:"):
+        access = source.get("early_access") if isinstance(source.get("early_access"), dict) else {}
+        return access.get("active") is True and not access.get("full_release_at")
+    if _igdb_early_access(source):
+        return True
+    released = _moment(source.get("release_at"), parse_timestamp_fn)
+    if released is None:
+        return True
+    return (source.get("release_precision", "day") != "day"
+            and now < released + timedelta_type(days=tracking_days))
 
 
 def _sources(entry: dict, *, deepcopy_fn=None) -> dict:
@@ -90,7 +228,7 @@ def normalize_tracking_state(
         if not isinstance(enrollment, dict) or not enrollment.get("source"):
             raise ValueError("Tracked game requires enrollment evidence")
         parse_timestamp_fn(enrollment.get("observed_at"))
-        for field in ("last_seen_at", "updated_at", "release_at", "expires_at"):
+        for field in ("last_seen_at", "updated_at", "release_at", "expires_at", "resumes_at"):
             if entry.get(field) is not None:
                 parse_timestamp_fn(entry[field])
         for key, source in sources_fn(entry).items():
@@ -100,13 +238,7 @@ def normalize_tracking_state(
                 raise ValueError("Invalid tracking source status")
             if key.startswith("steam:") and str(source.get("steam_appid")) != key[6:]:
                 raise ValueError("Steam tracking source identity does not match")
-            for field in (
-                "first_seen_at",
-                "last_seen_at",
-                "updated_at",
-                "release_at",
-                "expires_at",
-            ):
+            for field in TIME_FIELDS:
                 if source.get(field) is not None:
                     parse_timestamp_fn(source[field])
         if entry.get("last_observation") is not None and (
@@ -157,12 +289,50 @@ def release_from_observation(
     return (None, None)
 
 
+def launch_evidence(row: dict) -> tuple[str | None, dict | None]:
+    """IGDB's precision of the first release date and its exact Early Access
+    and full release dates, from the census row's release evidence."""
+    evidence = row.get("release_evidence") if isinstance(row.get("release_evidence"), dict) else {}
+    if not evidence.get("first_release_date"):
+        return (None, None)
+    precision = evidence.get("release_precision")
+    launches = {field: evidence.get(field) for field in ("early_access_at", "full_release_at")}
+    return (precision if isinstance(precision, str) else None,
+            launches if "release_precision" in evidence else None)
+
+
+def record_hit(entry: dict, at: datetime, *, sources_fn=None, parse_timestamp_fn=None,
+               timestamp_fn=None, timedelta_type=None, hit_days=None) -> bool:
+    """A threshold audience that counts on its own (see hit_counts) keeps the
+    game for HIT_DAYS after this hour."""
+    sources_fn = _sources if sources_fn is None else sources_fn
+    timestamp_fn = timestamp if timestamp_fn is None else timestamp_fn
+    timedelta_type = timedelta if timedelta_type is None else timedelta_type
+    hit_days = HIT_DAYS if hit_days is None else hit_days
+    sources = sources_fn(entry)
+    source = sources.get("twitch_new")
+    if source is None or not hit_counts(sources, at, parse_timestamp_fn=parse_timestamp_fn,
+                                        timedelta_type=timedelta_type):
+        return False
+    start = _moment(source.get("hit_started_at"), parse_timestamp_fn)
+    until = _moment(source.get("hit_until"), parse_timestamp_fn)
+    ongoing = bool(start and until and start <= at <= until)
+    if not ongoing:
+        source["hit_started_at"] = timestamp_fn(at)
+    source["hit_until"] = timestamp_fn(max(until, at + timedelta_type(days=hit_days))
+                                       if ongoing else at + timedelta_type(days=hit_days))
+    source["updated_at"] = timestamp_fn(at)
+    return True
+
+
 def reconcile_tracking_entry(
     entry: dict,
     now: datetime,
     *,
     release_at: str | None = None,
     release_source: str | None = None,
+    release_precision: str | None = None,
+    launches: dict | None = None,
     non_game_ids=(),
     deepcopy_fn=None,
     timestamp_fn=None,
@@ -172,6 +342,8 @@ def reconcile_tracking_entry(
     pre_release_days=None,
     timedelta_type=None,
 ) -> dict:
+    """Each source is active inside one of its launch windows (or, for Twitch,
+    its viewer-threshold window); otherwise it has ended or waits for a launch."""
     deepcopy_fn = deepcopy if deepcopy_fn is None else deepcopy_fn
     timestamp_fn = timestamp if timestamp_fn is None else timestamp_fn
     parse_timestamp_fn = parse_timestamp if parse_timestamp_fn is None else parse_timestamp_fn
@@ -197,14 +369,36 @@ def reconcile_tracking_entry(
             release_source=release_source,
             updated_at=timestamp_fn(now),
         )
+        if release_source == "igdb_first_release_date":
+            if release_precision is not None:
+                twitch["release_precision"] = release_precision
+            if launches is not None:
+                twitch["launches"] = deepcopy_fn(launches)
+        else:
+            twitch["release_precision"] = "day"
     permanently_excluded = entry["game_id"] in non_game_ids or entry.get("status") == "excluded"
+    windows = launch_windows(entry, sources_fn=sources_fn, parse_timestamp_fn=parse_timestamp_fn,
+                             timedelta_type=timedelta_type, tracking_days=tracking_days,
+                             pre_release_days=pre_release_days)
     for key, source in sources.items():
-        released = source.get("release_at")
+        own = [(begin, end, launch) for begin, end, launch, owner in windows if owner == key]
+        if key == "twitch_new":
+            own += [(begin, end, None) for begin, end in hit_windows(
+                source, sources, parse_timestamp_fn=parse_timestamp_fn, timedelta_type=timedelta_type)]
+        spans = _union(own)
+        current = next((span for span in spans if span[0] <= now < span[1]), None)
+        later = [span for span in spans if now < span[0]]
+        ended = [span for span in spans if span[1] <= now]
         source["expires_at"] = (
-            timestamp_fn(parse_timestamp_fn(released) + timedelta_type(days=tracking_days))
-            if released
-            else None
+            timestamp_fn(current[1]) if current
+            else timestamp_fn(ended[-1][1]) if ended
+            else timestamp_fn(later[0][1]) if later else None
         )
+        if later and not current:
+            source["resumes_at"] = timestamp_fn(later[0][0])
+        else:
+            source.pop("resumes_at", None)
+        released = [launch for _, _, launch in own if launch is not None]
         if permanently_excluded:
             source.update(
                 status="excluded",
@@ -216,22 +410,32 @@ def reconcile_tracking_entry(
             )
         elif source.get("status") == "excluded":
             continue
-        elif source["expires_at"] and now >= parse_timestamp_fn(source["expires_at"]):
-            source.update(status="expired", status_reason="release_window_elapsed")
-        elif key.startswith("steam:") and (
-            not released
-            or now < parse_timestamp_fn(released) - timedelta_type(days=pre_release_days)
-        ):
+        elif current:
+            ahead = [launch for begin, end, launch in own
+                     if launch is not None and begin <= now < end]
+            if key.startswith("steam:"):
+                reason = (
+                    "steam_recent_release" if not ahead or any(launch <= now for launch in ahead)
+                    else "steam_full_release_pending" if any(launch <= now for launch in released)
+                    else "steam_pre_release"
+                )
+            else:
+                reason = "within_release_window" if ahead else "twitch_viewers"
+            source.update(status="active", status_reason=reason)
+        elif key.startswith("steam:") and not any(launch <= now for launch in released):
             source.update(status="expired", status_reason="steam_not_released")
-        else:
+        elif _awaiting(key, source, released, now, parse_timestamp_fn=parse_timestamp_fn,
+                       timedelta_type=timedelta_type, tracking_days=tracking_days):
             source.update(
-                status="active",
+                status="expired",
                 status_reason=(
-                    ("steam_pre_release" if now < parse_timestamp_fn(released) else "steam_recent_release")
-                    if key.startswith("steam:")
-                    else "within_release_window" if released else "awaiting_release_date"
+                    "awaiting_full_release"
+                    if key.startswith("steam:") or _igdb_early_access(source)
+                    else "awaiting_launch"
                 ),
             )
+        else:
+            source.update(status="expired", status_reason="release_window_elapsed")
     active = [source for source in sources.values() if source["status"] == "active"]
     matches = {
         str(steam.get("steam_appid")): deepcopy_fn(steam)
@@ -251,6 +455,7 @@ def reconcile_tracking_entry(
         if any((not source.get("expires_at") for source in active))
         else max((source["expires_at"] for source in active), key=parse_timestamp_fn, default=None)
     )
+    entry.pop("resumes_at", None)
     if permanently_excluded:
         entry.update(
             status="excluded",
@@ -268,13 +473,32 @@ def reconcile_tracking_entry(
             ),
         )
     else:
-        entry.update(status="expired", status_reason="release_window_elapsed")
+        reasons = {source.get("status_reason") for source in sources.values()
+                   if source.get("status") == "expired"}
+        entry.update(
+            status="expired",
+            status_reason=next(
+                (reason for reason in ("awaiting_full_release", "awaiting_launch", "steam_not_released")
+                 if reason in reasons),
+                "release_window_elapsed",
+            ),
+        )
         entry["expires_at"] = max(
             (source["expires_at"] for source in sources.values() if source.get("expires_at")),
             key=parse_timestamp_fn,
             default=None,
         )
+        resumes = [source["resumes_at"] for source in sources.values()
+                   if source.get("status") == "expired" and source.get("resumes_at")]
+        if resumes:
+            entry["resumes_at"] = min(resumes, key=parse_timestamp_fn)
     return entry
+
+
+def awaiting_launch(entry: dict | None) -> bool:
+    """An ended game that reaching the viewer threshold again brings back."""
+    return (isinstance(entry, dict) and entry.get("status") == "expired"
+            and entry.get("status_reason") in AWAITING_REASONS)
 
 
 def admission_evidence(
@@ -401,8 +625,11 @@ def enroll_steam_mapping(
     if not released:
         return None
     release_time = parse_timestamp_fn(released)
-    if not (release_time - timedelta_type(days=pre_release_days)
-            <= now < release_time + timedelta_type(days=tracking_days)):
+    # The Steam release and, for an Early Access game, its start and full release.
+    launches = launch_times("steam:" + appid, {"release_at": released, "early_access": steam.get("early_access")},
+                            parse_timestamp_fn=parse_timestamp_fn)
+    if not any(launch - timedelta_type(days=pre_release_days)
+               <= now < launch + timedelta_type(days=tracking_days) for launch in launches):
         return None
     entry = state["games"].get(game_id)
     if entry is not None and entry["status"] == "excluded":
@@ -438,6 +665,7 @@ def enroll_steam_mapping(
         "steam": steam,
         "release_at": timestamp_fn(release_time),
         "release_source": "steam_taiwan_store",
+        "early_access": deepcopy_fn(steam.get("early_access")),
         "first_seen_at": previous.get("first_seen_at") or timestamp_fn(now),
         "enrollment": deepcopy_fn(previous.get("enrollment") or enrollment),
         "updated_at": timestamp_fn(now),
@@ -521,6 +749,7 @@ def reconcile_steam_catalog(
                     steam=deepcopy_fn(steam),
                     release_at=steam.get("release_at"),
                     release_source="steam_taiwan_store",
+                    early_access=deepcopy_fn(steam.get("early_access")),
                     status="active",
                     updated_at=timestamp_fn(now),
                 )
@@ -538,6 +767,7 @@ def enroll_observation(
     eligibility_at: datetime | None = None,
     allow_twitch_enrollment: bool = True,
     chinese_discovery: bool = False,
+    revival: bool = False,
     deepcopy_fn=None,
     timestamp_fn=None,
     sources_fn=None,
@@ -545,8 +775,14 @@ def enroll_observation(
     release_from_observation_fn=None,
     admission_evidence_fn=None,
     tracking_metadata_fn=None,
+    record_hit_fn=None,
 ) -> dict | None:
-    """Add qualified Twitch membership, then store one real census observation."""
+    """Add qualified Twitch membership, then store one real census observation.
+
+    ``revival`` marks an ended game waiting for a launch: reaching the
+    threshold brings it back without fresh newness evidence.
+    """
+    record_hit_fn = record_hit if record_hit_fn is None else record_hit_fn
     deepcopy_fn = deepcopy if deepcopy_fn is None else deepcopy_fn
     timestamp_fn = timestamp if timestamp_fn is None else timestamp_fn
     sources_fn = _sources if sources_fn is None else sources_fn
@@ -585,6 +821,12 @@ def enroll_observation(
         and (count >= minimum)
         and bool(evidence_source)
     )
+    revived = (
+        revival
+        and awaiting_launch(entry)
+        and type(count) in (int, float)
+        and count >= minimum
+    )
     enrollment = {
         "source": evidence_source,
         "observed_at": timestamp_fn(observed_at),
@@ -607,13 +849,13 @@ def enroll_observation(
     if entry["status"] == "excluded":
         return None
     sources = entry["tracking_sources"] if "tracking_sources" in entry else sources_fn(entry)
-    if "twitch_new" not in sources and qualifies:
+    if "twitch_new" not in sources and (qualifies or revived):
         sources["twitch_new"] = {
             "source": "twitch_new",
             "first_seen_at": timestamp_fn(observed_at),
-            "enrollment": enrollment,
+            "enrollment": enrollment if qualifies else {**enrollment, "source": "awaiting_launch"},
             "status": "active",
-            "status_reason": "awaiting_release_date",
+            "status_reason": "twitch_viewers",
         }
     for key in ("game_name", "igdb_id", "box_art_url"):
         if row.get(key):
@@ -621,9 +863,13 @@ def enroll_observation(
     if "steam_matches" in row:
         entry["steam_matches"] = deepcopy_fn(row["steam_matches"])
     released, source = release_from_observation_fn(row)
+    precision, launches = launch_evidence(row)
     reconcile_tracking_entry_fn(
-        entry, eligible_time, release_at=released, release_source=source, non_game_ids=non_game_ids
+        entry, eligible_time, release_at=released, release_source=source,
+        release_precision=precision, launches=launches, non_game_ids=non_game_ids
     )
+    if (qualifies or revived) and record_hit_fn(entry, eligible_time):
+        reconcile_tracking_entry_fn(entry, eligible_time, non_game_ids=non_game_ids)
     entry["last_seen_at"], entry["updated_at"] = (
         timestamp_fn(observed_at),
         timestamp_fn(observed_at),

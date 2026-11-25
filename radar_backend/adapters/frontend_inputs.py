@@ -62,6 +62,7 @@ def load_published_inputs() -> dict:
         from radar_backend.adapters.database_inputs import load_inputs
         return load_inputs()
     from radar_backend.adapters.steam_twitch_mapping import normalize_steam_catalog
+    from radar_backend.domain.steam_twitch_mapping import STORE_FACTS_PATH, attach_early_access
 
     return application.load_published_inputs(
         frontend_head=frontend_head,
@@ -76,4 +77,6 @@ def load_published_inputs() -> dict:
         steam_path=STEAM_PATH,
         mapping_path=MAPPING_PATH,
         discovery_path=DISCOVERY_PATH,
+        store_facts_path=STORE_FACTS_PATH,
+        attach_early_access=attach_early_access,
     )

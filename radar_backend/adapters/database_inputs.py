@@ -17,14 +17,20 @@ DISCOVERY = "data/twitch_steam_discovery.json"
 
 def load_inputs():
     from radar_backend.adapters.steam_twitch_mapping import normalize_steam_catalog
+    from radar_backend.domain.steam_twitch_mapping import STORE_FACTS_PATH, attach_early_access
 
-    head, files = primary.read_files(SOURCE, [TRACKING, CATALOG, MAPPING, DISCOVERY])
+    head, files = primary.read_files(SOURCE, [TRACKING, CATALOG, MAPPING, DISCOVERY, STORE_FACTS_PATH])
     try:
         documents = {path: json.loads(files[path]) for path in (TRACKING, CATALOG, MAPPING, DISCOVERY)}
     except (KeyError, TypeError, ValueError, UnicodeError):
         raise StorageError("INVALID_TWITCH_DATABASE_INPUT", "A required Twitch database input is missing or invalid.") from None
     tracking = validate_persisted_tracking(documents[TRACKING])
     catalog = documents[CATALOG]
+    # Store facts only add Early Access records to the catalog; they are optional.
+    try:
+        attach_early_access(catalog, json.loads(files[STORE_FACTS_PATH]))
+    except (KeyError, TypeError, ValueError, UnicodeError):
+        pass
     normalize_steam_catalog(catalog, datetime.now(timezone.utc))
     proof = {"provider": "turso", "source_id": SOURCE,
              **{key: head[key] for key in ("revision", "manifest_digest", "generation")}}
