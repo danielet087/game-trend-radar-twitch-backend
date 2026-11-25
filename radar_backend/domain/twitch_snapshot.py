@@ -680,6 +680,7 @@ def validate_snapshot(
             if "streamer_counts_above_viewers" in chinese:
                 regional_tiers = chinese["streamer_counts_above_viewers"]
                 if (not valid_viewer_tiers(regional_tiers, viewers=regional_viewers, streamers=regional_streamers)
+                        or tiers is not None and len(tiers) != len(regional_tiers)
                         or not independent and tiers is not None and not valid_viewer_tiers(
                             [total - local for total, local in zip(tiers, regional_tiers)],
                             viewers=viewers - regional_viewers, streamers=streamers - regional_streamers)):

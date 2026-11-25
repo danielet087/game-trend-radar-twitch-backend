@@ -11,7 +11,10 @@ MIN_FOLLOWERS = 1000
 MIN_VIEWERS = 10
 CHINESE_DISCOVERY_MIN_VIEWERS = 100
 CHINESE_LANGUAGE_SOURCE = "helix_language_filter"
-VIEWER_TIERS = (30, 50, 100)
+# The 60-viewer tier was added on 2026-11-26 (the stream planning default);
+# hours saved before then keep the three older tiers.
+VIEWER_TIERS = (30, 50, 60, 100)
+LEGACY_VIEWER_TIERS = (30, 50, 100)
 
 
 def streamer_counts_above_viewers(viewer_counts):
@@ -19,13 +22,21 @@ def streamer_counts_above_viewers(viewer_counts):
     return [sum(viewers > threshold for viewers in viewer_counts) for threshold in VIEWER_TIERS]
 
 
+def tier_layout(counts):
+    """The tiers a list of counts was collected with, or None."""
+    if not isinstance(counts, list):
+        return None
+    return next((tiers for tiers in (VIEWER_TIERS, LEGACY_VIEWER_TIERS) if len(tiers) == len(counts)), None)
+
+
 def valid_viewer_tiers(counts, *, viewers, streamers):
-    if (not isinstance(counts, list) or len(counts) != len(VIEWER_TIERS)
+    tiers = tier_layout(counts)
+    if (tiers is None
             or not all(type(count) is int and 0 <= count <= streamers for count in counts)
             or counts != sorted(counts, reverse=True)):
         return False
     minimum_viewers = sum((threshold - previous) * count
-                          for threshold, previous, count in zip(VIEWER_TIERS, (-1, *VIEWER_TIERS), counts))
+                          for threshold, previous, count in zip(tiers, (-1, *tiers), counts))
     return minimum_viewers <= viewers
 
 
