@@ -10,7 +10,7 @@ from radar_backend.application.twitch_chinese import (
     SCAN_ERRORS, collect_chinese_audience, discovery_shortlist, scan_codes, scan_languages,
 )
 from radar_backend.domain.twitch_audience import CHINESE_DISCOVERY_MIN_VIEWERS
-from radar_backend.domain.twitch_tracking import prelaunch_only
+from radar_backend.domain.twitch_tracking import awaiting_launch, prelaunch_only
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 
@@ -231,9 +231,10 @@ def collect_candidates(
     after = None
     measured_count = below_count = 0
     prelaunch_ids = set()
+    revival_by_id: dict[str, dict] = {}
     stop_reason = None
 
-    def refresh_tracking(game: dict, prediction: dict, at: datetime) -> dict | None:
+    def refresh_tracking(game: dict, prediction: dict, at: datetime, hint: dict | None = None) -> dict | None:
         entry = tracking["games"].get(str(game["id"]))
         if entry is None:
             return None
@@ -256,8 +257,14 @@ def collect_candidates(
             )
             if trial.get("status") == "evaluated":
                 released, release_source = (trial.get("release_at"), "twitch_original_release_date")
+        hint = hint or {}
+        exact = release_source == "igdb_first_release_date" and "release_precision" in hint
         reconcile_tracking_entry(
-            entry, at, release_at=released, release_source=release_source, non_game_ids=non_game_ids
+            entry, at, release_at=released, release_source=release_source,
+            release_precision=hint.get("release_precision") if exact else None,
+            launches={field: hint.get(field) for field in ("early_access_at", "full_release_at")}
+            if exact else None,
+            non_game_ids=non_game_ids,
         )
         entry["updated_at"] = timestamp(at)
         return entry
@@ -317,12 +324,15 @@ def collect_candidates(
                 hints_clock,
                 source="igdb_first_release_date",
             )
-            tracked_entry = refresh_tracking(game, prediction, hints_clock)
+            tracked_entry = refresh_tracking(game, prediction, hints_clock, hint)
             already_tracking = tracked_entry is not None and tracked_entry["status"] == "active"
+            # An ended game waiting for a launch is measured again: the
+            # threshold brings it back without fresh newness evidence.
+            awaiting = awaiting_launch(tracked_entry)
             if game_id not in non_game_ids:
                 igdb_predictions[game_id] = prediction
             if game_id in non_game_ids or (
-                verification["status"] == "not_new" and (not already_tracking)
+                verification["status"] == "not_new" and (not already_tracking) and not awaiting
             ):
                 candidates_by_id.pop(game_id, None)
                 channels_by_game.pop(game_id, None)
@@ -339,7 +349,7 @@ def collect_candidates(
                     "viewer_threshold_met": None,
                 }
                 continue
-            if not already_tracking and (
+            if not already_tracking and not awaiting and (
                 prediction["status"] == "evaluated"
                 and prediction["predicted_new"] is False
                 or tracked_entry is not None
@@ -397,6 +407,10 @@ def collect_candidates(
                 and prediction["predicted_new"] is False
             ):
                 candidates_by_id.pop(game_id, None)
+                if awaiting:
+                    revival_by_id[game_id] = row
+                    if channels is not None:
+                        channels_by_game[game_id] = channels
                 continue
             candidates_by_id[game_id] = row
             if channels is not None:
@@ -419,6 +433,28 @@ def collect_candidates(
         after = cursor
     else:
         raise incomplete_error("Category page limit reached before threshold boundary")
+    # Games waiting for a launch outside the top directory: IGDB may now know
+    # the launch, which can open its window before this hour's census.
+    waiting = [entry for game_id, entry in tracking["games"].items()
+               if awaiting_launch(entry) and game_id not in seen_ids
+               and str(entry.get("igdb_id") or "").isdigit()]
+    hints_clock = now or datetime_type.now(timezone_type.utc)
+    waiting_games = [{"id": entry["game_id"], "name": entry["game_name"], "igdb_id": entry.get("igdb_id"),
+                      "box_art_url": entry.get("box_art_url")} for entry in waiting]
+    unchecked = [game for game in waiting_games if str(game["igdb_id"]) not in requested_igdb_ids]
+    if include_release_hints and unchecked:
+        waiting_hints, status = release_hints(
+            client, unchecked, hints_clock, deadline=deadline, monotonic=monotonic
+        )
+        hints.update(waiting_hints)
+        hints_statuses.append(status)
+        requested_igdb_ids.update(str(game["igdb_id"]) for game in unchecked)
+    for game in waiting_games:
+        hint = hints.get(str(game.get("igdb_id")), {})
+        if hint:
+            prediction = evaluate_date(hint.get("first_release_date"), hint.get("checked_at"),
+                                       hints_clock, source="igdb_first_release_date")
+            refresh_tracking(game, prediction, hints_clock, hint)
     # Active enrollment receives a complete census even outside the top directory.
     missing = [
         entry
@@ -468,7 +504,7 @@ def collect_candidates(
             source="igdb_first_release_date",
         )
         igdb_predictions[game_id] = prediction
-        entry = refresh_tracking(game, prediction, hints_clock)
+        entry = refresh_tracking(game, prediction, hints_clock, hint)
         if entry["status"] != "active":
             continue
         # Before a Steam release only viewers and channels are counted: the
@@ -592,7 +628,7 @@ def collect_candidates(
             if row.get("audience_regions", {}).get("zh", {}).get("viewer_count", 0) >= CHINESE_DISCOVERY_MIN_VIEWERS
         }
     candidates, excluded = (list(candidates_by_id.values()), list(excluded_by_id.values()))
-    measured_rows = {**retained_by_id, **candidates_by_id, **chinese_rows}
+    measured_rows = {**revival_by_id, **retained_by_id, **candidates_by_id, **chinese_rows}
     hints_status = (
         "disabled"
         if not include_release_hints
@@ -664,6 +700,7 @@ def collect_candidates(
                 prediction.get("status") == "evaluated" and prediction.get("predicted_new") is False
             ),
             chinese_discovery=row["game_id"] in chinese_rows,
+            revival=row["game_id"] in revival_by_id,
         )
     tracking["updated_at"] = timestamp(finished)
     tracked = [
@@ -751,12 +788,20 @@ def collect_candidates(
                 (row["game_id"] not in candidates_by_id for row in tracked)
             ),
             "tracked_before_release_count": len(prelaunch_ids),
+            "awaiting_launch_count": sum(awaiting_launch(entry) for entry in tracking["games"].values()),
+            "revived_game_ids": sorted(game_id for game_id in revival_by_id
+                                       if tracking["games"].get(game_id, {}).get("status") == "active"),
             "tracking_note": (
-                "Twitch new-game discovery and Steam games from 14 days before to 30 days after "
-                "release independently admit categories. Active source memberships are unioned "
-                "by Twitch ID and measured once; directory absence, viewer decline and badge "
-                "disappearance do not remove active memberships. Games kept only by a Steam "
-                "release still to come are counted without follower lookups."
+                "Twitch new-game discovery and Steam games independently admit categories. "
+                "Every launch (a release, an Early Access start, the full release after it) is "
+                "followed from 14 days before to 30 days after; a Twitch audience of the "
+                "threshold outside those windows (a demo, a beta, a game waiting for its full "
+                "release or with no known date) keeps a game for 30 days after its latest such "
+                "hour. Between launches an ended game waits, and reaching the threshold again "
+                "brings it back. Active source memberships are unioned by Twitch ID and measured "
+                "once; directory absence, viewer decline and badge disappearance do not remove "
+                "active memberships. Games kept only by a Steam release still to come are "
+                "counted without follower lookups."
             ),
         },
         "candidate_games": candidates,

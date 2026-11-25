@@ -114,7 +114,11 @@ def test_steam_expiry_cannot_end_unknown_date_twitch_membership():
     steam = normalize_steam_catalog(catalog(steam_row(released=NOW - timedelta(days=29))), NOW)[0]
     enroll_steam_mapping(state, mapping_for(steam), NOW)
     reconcile_tracking_entry(entry, NOW + timedelta(days=1))
-    assert entry["status"] == "active" and entry["expires_at"] is None
+    # Without a date of its own, the Twitch admission keeps it for 30 days.
+    admitted = entry["tracking_sources"]["twitch_new"]["enrollment"]["observed_at"]
+    assert entry["status"] == "active"
+    assert entry["expires_at"] == timestamp(datetime.fromisoformat(admitted.replace("Z", "+00:00"))
+                                            + timedelta(days=30))
     assert entry["tracking_sources"]["steam:100"]["status"] == "expired"
 
 

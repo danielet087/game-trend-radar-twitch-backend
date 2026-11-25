@@ -114,10 +114,42 @@ def _release_reference(entry, matched_steam, admitted_sources):
     labels = {"igdb_first_release_date": "IGDB 首次發售日",
               "twitch_original_release_date": "Twitch 首次發售日"}
     released = _time(source.get("release_at"))
+    # IGDB keeps "2027" as 2027-12-31: only a date known to the day is a Day 0.
+    if kind == "igdb_first_release_date" and source.get("release_precision", "day") != "day":
+        return None
     if kind in labels and released:
         return {"date": released.astimezone(TAIPEI).date().isoformat(),
                 "source": labels[kind], "precision": "day", "source_type": kind}
     return None
+
+
+def _launches(entry):
+    """The Early Access and full release days of a game with an Early Access
+    launch: Steam's record first, then IGDB's."""
+    sources = (entry or {}).get("tracking_sources")
+    if not isinstance(sources, dict):
+        return None
+
+    def day(value):
+        moment = _time(value)
+        return moment.astimezone(TAIPEI).date().isoformat() if moment else None
+
+    found = {}
+    for key, source in sorted(sources.items(), key=lambda item: not item[0].startswith("steam:")):
+        if not isinstance(source, dict) or source.get("status") == "excluded":
+            continue
+        if key.startswith("steam:"):
+            dates = source.get("early_access") if isinstance(source.get("early_access"), dict) else {}
+            pairs = (("early_access", dates.get("started_at")), ("full_release", dates.get("full_release_at")))
+            label, kind = "Steam 台灣商店", "steam"
+        else:
+            dates = source.get("launches") if isinstance(source.get("launches"), dict) else {}
+            pairs = (("early_access", dates.get("early_access_at")), ("full_release", dates.get("full_release_at")))
+            label, kind = "IGDB", "igdb"
+        for name, value in pairs:
+            if name not in found and day(value):
+                found[name] = {"date": day(value), "source": label, "source_type": f"{kind}_{name}"}
+    return found if "early_access" in found else None
 
 
 def _archive_metadata(frontend, root, index):
@@ -205,6 +237,16 @@ def _archive_metadata(frontend, root, index):
             status = "unknown"
         game["tracking_status"] = status
         game["tracking_reason"] = (entry or {}).get("status_reason")
+        # A game waiting for a launch says when its next window opens.
+        if status == "ended" and _time((entry or {}).get("resumes_at")):
+            game["tracking_resumes_at"] = entry["resumes_at"]
+        else:
+            game.pop("tracking_resumes_at", None)
+        launches = _launches(entry)
+        if launches:
+            game["launches"] = launches
+        else:
+            game.pop("launches", None)
         steam = []
         for item in (entry or {}).get("steam_matches", []):
             decision = forward.get(str(item.get("steam_appid")))

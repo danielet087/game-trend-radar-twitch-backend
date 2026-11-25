@@ -24,15 +24,24 @@ def load_published_inputs(
     steam_path,
     mapping_path,
     discovery_path,
+    store_facts_path=None,
+    attach_early_access=None,
 ) -> dict:
     """Resolve one frontend revision, then load its complete collection inputs.
 
     Only absent mapping/discovery files are supported bootstrap conditions. Missing
     required data, invalid JSON and any non-404 HTTP error stop collection.
+    Store facts only add Early Access records; any failure to read them leaves
+    the catalog without those records.
     """
     commit = frontend_head()
     tracking = validate_persisted_tracking(read_published_json(commit, tracking_path))
     catalog = read_published_json(commit, steam_path)
+    if store_facts_path and attach_early_access:
+        try:
+            attach_early_access(catalog, read_published_json(commit, store_facts_path))
+        except (http_error, ValueError, TypeError, OSError):
+            pass
     normalize_steam_catalog(catalog, clock())
     catalog = {**catalog, "_source_commit": commit}
     try:
