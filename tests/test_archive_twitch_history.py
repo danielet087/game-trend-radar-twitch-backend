@@ -99,6 +99,9 @@ def test_after_the_move_finished_days_are_read_from_the_database(tmp_path, monke
     primary_store.bootstrap_primary(client, views.REPOSITORY + "@" + views.BRANCH,
                                     {f"data/twitch_history/{p.name}": p.read_bytes() for p in history.glob("*.json")},
                                     "seed")
+    # The frontend source holds no flag yet: the checkout's day files are read.
+    primary_store.bootstrap_primary(client, views.REPOSITORY + "@main",
+                                    {"data/catalog.json": b'{"games": []}'}, "seed")
     monkeypatch.setattr(primary, "client", lambda: client)
     frontend = tmp_path / "frontend"
     write_days(frontend, ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"])
@@ -111,4 +114,29 @@ def test_after_the_move_finished_days_are_read_from_the_database(tmp_path, monke
     assert moved["source"] == "database" and moved["generation"] == 1 and moved["archived"] == ["2026-11-01"]
     assert gzip.decompress(releases.assets["twitch-history-2026-11"]["2026-11-01.json.gz"]) == \
         (history / "2026-11-01.json").read_bytes()
+    client.close()
+
+
+def test_without_the_flag_in_the_checkout_the_database_flag_decides(tmp_path, monkeypatch):
+    """After the frontend's Git drops its data, the sparse checkout has no flag."""
+    from radar_core.storage import documents, primary, primary_store
+    from radar_core.storage.sql import SqliteClient
+    from radar_backend.state import twitch_views_store as views
+    from scripts.archive_twitch_history import _archive_frontend
+
+    days = ["2026-11-01", "2026-11-02", "2026-11-03", "2026-11-04"]
+    history = write_days(tmp_path / "views", days)
+    client = SqliteClient(tmp_path / "radar.sqlite")
+    documents.initialize(client)
+    primary_store.bootstrap_primary(client, views.REPOSITORY + "@" + views.BRANCH,
+                                    {f"data/twitch_history/{p.name}": p.read_bytes() for p in history.glob("*.json")},
+                                    "seed")
+    primary_store.bootstrap_primary(client, views.REPOSITORY + "@main", {
+        views.FLAG: views.flag_document(generation=1, files=4, raw_bytes=1, moved_at="x")}, "seed")
+    monkeypatch.setattr(primary, "client", lambda: client)
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    releases = MemoryReleases()
+    moved = _archive_frontend(frontend, releases, 3)
+    assert moved["source"] == "database" and moved["archived"] == ["2026-11-01"]
     client.close()

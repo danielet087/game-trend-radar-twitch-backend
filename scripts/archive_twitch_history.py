@@ -154,11 +154,25 @@ def archive(history: Path, releases, *, keep_days: int = KEEP_DAYS) -> dict:
     return report
 
 
+def _views_mode(frontend: Path) -> str:
+    """The Twitch views flag of the checkout; without one, the database's copy.
+
+    The workflow checks out the flag with the day files. Once the frontend's
+    Git no longer holds its data (the site data lives in the database), the
+    checkout has no flag and the frontend source in the database decides.
+    """
+    from radar_backend.state import twitch_views_store as views_store
+
+    if (frontend / views_store.FLAG).is_file():
+        return views_store.views_mode(frontend)
+    return views_store.mode_in_database()
+
+
 def _archive_frontend(frontend: Path, releases, keep_days: int) -> dict:
     """Read the day files from wherever the Twitch views flag says they live."""
     from radar_backend.state import twitch_views_store as views_store
 
-    if views_store.views_mode(frontend) == "mirror":
+    if _views_mode(frontend) == "mirror":
         report = archive(frontend / "data/twitch_history", releases, keep_days=keep_days)
         return {**report, "source": "frontend"}
     with tempfile.TemporaryDirectory(prefix="twitch-history-views.") as temporary:
