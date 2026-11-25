@@ -7,7 +7,7 @@ import re
 
 from radar_backend.domain.twitch_audience import CHINESE_DISCOVERY_MIN_VIEWERS
 from radar_backend.domain.twitch_candidates import NON_GAME_IDS
-from radar_backend.domain.twitch_tracking import TRACKING_DAYS
+from radar_backend.domain.twitch_tracking import PRE_RELEASE_DAYS, TRACKING_DAYS
 
 TWITCH_EVIDENCE = {"igdb_first_release_date", "twitch_directory_dom", "twitch_original_release_date"}
 
@@ -25,6 +25,7 @@ def qualified_archive_sources(game_id, entry):
 
     These are the admission receipts written by the canonical tracking rules.
     Do not reapply today's date or viewer count to an earlier valid admission.
+    A Steam receipt is valid from two weeks before its recorded release.
     """
     if (not re.fullmatch(r"[1-9]\d{0,15}", game_id) or game_id in NON_GAME_IDS
             or not isinstance(entry, dict) or entry.get("game_id") != game_id
@@ -54,6 +55,7 @@ def qualified_archive_sources(game_id, entry):
         elif re.fullmatch(r"steam:[1-9]\d*", key) and evidence.get("source") == "steam_recent_release":
             appid, released = key[6:], _time(evidence.get("release_at"))
             if (str(source.get("steam_appid")) == appid == str(evidence.get("steam_appid"))
-                    and released and released <= observed < released + timedelta(days=TRACKING_DAYS)):
+                    and released and released - timedelta(days=PRE_RELEASE_DAYS)
+                    <= observed < released + timedelta(days=TRACKING_DAYS)):
                 qualified.append(key)
     return sorted(qualified)

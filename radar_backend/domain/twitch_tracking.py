@@ -9,6 +9,9 @@ from radar_backend.domain.twitch_audience import CHINESE_DISCOVERY_MIN_VIEWERS
 from radar_backend.domain.twitch_newness import parse_timestamp, timestamp
 
 TRACKING_DAYS = 30
+# Steam games are followed from two weeks before their Steam release, so
+# streams from deluxe-edition early access or early keys are on record.
+PRE_RELEASE_DAYS = 14
 STATUSES = {"active", "expired", "excluded"}
 
 
@@ -166,6 +169,7 @@ def reconcile_tracking_entry(
     parse_timestamp_fn=None,
     sources_fn=None,
     tracking_days=None,
+    pre_release_days=None,
     timedelta_type=None,
 ) -> dict:
     deepcopy_fn = deepcopy if deepcopy_fn is None else deepcopy_fn
@@ -173,6 +177,7 @@ def reconcile_tracking_entry(
     parse_timestamp_fn = parse_timestamp if parse_timestamp_fn is None else parse_timestamp_fn
     sources_fn = _sources if sources_fn is None else sources_fn
     tracking_days = TRACKING_DAYS if tracking_days is None else tracking_days
+    pre_release_days = PRE_RELEASE_DAYS if pre_release_days is None else pre_release_days
     timedelta_type = timedelta if timedelta_type is None else timedelta_type
     sources = sources_fn(entry)
     twitch = sources.get("twitch_new")
@@ -213,13 +218,16 @@ def reconcile_tracking_entry(
             continue
         elif source["expires_at"] and now >= parse_timestamp_fn(source["expires_at"]):
             source.update(status="expired", status_reason="release_window_elapsed")
-        elif key.startswith("steam:") and (not released or now < parse_timestamp_fn(released)):
+        elif key.startswith("steam:") and (
+            not released
+            or now < parse_timestamp_fn(released) - timedelta_type(days=pre_release_days)
+        ):
             source.update(status="expired", status_reason="steam_not_released")
         else:
             source.update(
                 status="active",
                 status_reason=(
-                    "steam_recent_release"
+                    ("steam_pre_release" if now < parse_timestamp_fn(released) else "steam_recent_release")
                     if key.startswith("steam:")
                     else "within_release_window" if released else "awaiting_release_date"
                 ),
@@ -321,6 +329,14 @@ def admission_evidence(
     return None
 
 
+def prelaunch_only(entry: dict | None) -> bool:
+    """Only Steam sources before their release keep this game tracked."""
+    sources = (entry or {}).get("tracking_sources")
+    active = [source for source in (sources.values() if isinstance(sources, dict) else [])
+              if isinstance(source, dict) and source.get("status") == "active"]
+    return bool(active) and all(source.get("status_reason") == "steam_pre_release" for source in active)
+
+
 def tracking_metadata(entry: dict, *, deepcopy_fn=None) -> dict:
     deepcopy_fn = deepcopy if deepcopy_fn is None else deepcopy_fn
     return {
@@ -352,9 +368,11 @@ def enroll_steam_mapping(
     sources_fn=None,
     reconcile_tracking_entry_fn=None,
     tracking_days=None,
+    pre_release_days=None,
     timedelta_type=None,
 ) -> dict | None:
-    """Enroll one confirmed Steam release without requiring live viewers."""
+    """Enroll one confirmed Steam game from two weeks before its release,
+    without requiring live viewers."""
     deepcopy_fn = deepcopy if deepcopy_fn is None else deepcopy_fn
     timestamp_fn = timestamp if timestamp_fn is None else timestamp_fn
     parse_timestamp_fn = parse_timestamp if parse_timestamp_fn is None else parse_timestamp_fn
@@ -365,6 +383,7 @@ def enroll_steam_mapping(
         else reconcile_tracking_entry_fn
     )
     tracking_days = TRACKING_DAYS if tracking_days is None else tracking_days
+    pre_release_days = PRE_RELEASE_DAYS if pre_release_days is None else pre_release_days
     timedelta_type = timedelta if timedelta_type is None else timedelta_type
     game_id, appid = (
         str(mapping.get("twitch_game_id") or ""),
@@ -382,7 +401,8 @@ def enroll_steam_mapping(
     if not released:
         return None
     release_time = parse_timestamp_fn(released)
-    if not release_time <= now < release_time + timedelta_type(days=tracking_days):
+    if not (release_time - timedelta_type(days=pre_release_days)
+            <= now < release_time + timedelta_type(days=tracking_days)):
         return None
     entry = state["games"].get(game_id)
     if entry is not None and entry["status"] == "excluded":

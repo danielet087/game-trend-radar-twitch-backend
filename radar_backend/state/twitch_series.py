@@ -14,6 +14,7 @@ import re
 from urllib.parse import urlsplit
 
 from radar_backend.domain.twitch_archive import qualified_archive_sources
+from radar_backend.domain.twitch_tracking import PRE_RELEASE_DAYS
 
 TAIPEI = timezone(timedelta(hours=8))
 SERIES_PATH = "data/twitch_series/"
@@ -147,8 +148,10 @@ def _archive_metadata(frontend, root, index):
         if source.get("status") != "active" or as_of is None:
             return False
         expiry, release = _time(source.get("expires_at")), _time(source.get("release_at"))
+        # A Steam source tracks from two weeks before its release.
         return (not source.get("expires_at") or expiry is not None and expiry > as_of) and (
-            not steam or release is not None and expiry is not None and release <= as_of)
+            not steam or release is not None and expiry is not None
+            and release - timedelta(days=PRE_RELEASE_DAYS) <= as_of)
 
     for game_id, game in index["games"].items():
         samples = {}
@@ -161,7 +164,12 @@ def _archive_metadata(frontend, root, index):
                             if row.get("generated_at") == index["months"].get(month, {}).get(hour)})
         viewers = [row.get("viewer_count") for row in samples.values()]
         viewers = [value for value in viewers if type(value) in {int, float} and math.isfinite(value) and value >= 0]
+        # The first hour anyone was live in the category; with tracking from two
+        # weeks before a Steam release, this shows streams ahead of the launch.
+        live = [hour for hour, row in samples.items()
+                if type(row.get("streamer_count")) is int and row["streamer_count"] > 0]
         game.update(first_hour=min(samples, default=None), last_hour=max(samples, default=None),
+                    first_live_hour=min(live, default=None),
                     sample_count=len(samples), viewer_sample_count=len(viewers),
                     peak_viewer_count=max(viewers, default=None))
         chinese_samples = {hour: row["audience_regions"]["zh"] for hour, row in samples.items()

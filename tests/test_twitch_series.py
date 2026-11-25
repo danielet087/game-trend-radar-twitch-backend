@@ -326,5 +326,42 @@ class TwitchSeriesTests(unittest.TestCase):
             self.assertEqual(result, index)
 
 
+    def test_steam_game_tracked_before_release_is_active_with_its_first_live_hour(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry = tracking_state("42", at="2026-10-01T03:20:00Z")
+            entry = registry["games"]["42"]
+            release = "2026-10-05T16:00:00Z"
+            entry.update(status="active", status_reason="steam_pre_release",
+                         release_at=release, expires_at="2026-11-04T16:00:00Z")
+            entry["tracking_sources"] = {"steam:100": {
+                "status": "active", "status_reason": "steam_pre_release", "steam_appid": "100",
+                "release_at": release, "expires_at": "2026-11-04T16:00:00Z",
+                "enrollment": {"source": "steam_recent_release", "steam_appid": "100",
+                               "observed_at": "2026-09-30T16:00:00Z", "release_at": release}}}
+            (root / "data").mkdir(parents=True)
+            (root / "data/twitch_tracking.json").write_text(json.dumps(registry))
+            history = root / "data/twitch_history/2026-10-01.json"
+            history.parent.mkdir(parents=True)
+            counts = {"2026-09-30T16:00:00Z": (0, 0), "2026-09-30T17:00:00Z": (0, 0),
+                      "2026-09-30T18:00:00Z": (2, 130)}
+            history.write_text(json.dumps({"schema_version": 1, "timezone": "Asia/Taipei", "date": "2026-10-01",
+                "hours": {hour: {"generated_at": hour, "games": [{"game_id": "42", "game_name": "Upcoming",
+                    "viewer_count": viewers, "streamer_count": streamers}]}
+                    for hour, (streamers, viewers) in counts.items()}}))
+            project_series(root)
+            game = json.loads((root / "data/twitch_series/index.json").read_text())["games"]["42"]
+            self.assertEqual(game["admission_sources"], ["steam:100"])
+            self.assertEqual(game["tracking_status"], "active")
+            self.assertEqual(game["first_hour"], "2026-09-30T16:00:00Z")
+            self.assertEqual(game["first_live_hour"], "2026-09-30T18:00:00Z")
+            # More than two weeks before the release, the same receipt admits nothing.
+            entry["tracking_sources"]["steam:100"]["enrollment"]["observed_at"] = "2026-09-21T15:59:59Z"
+            (root / "data/twitch_tracking.json").write_text(json.dumps(registry))
+            project_series(root)
+            index = json.loads((root / "data/twitch_series/index.json").read_text())
+            self.assertNotIn("42", index["games"])
+
+
 if __name__ == '__main__':
     unittest.main()
