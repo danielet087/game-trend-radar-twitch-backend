@@ -10,6 +10,7 @@ from radar_backend.application.twitch_chinese import (
     SCAN_ERRORS, collect_chinese_audience, discovery_shortlist, scan_codes, scan_languages,
 )
 from radar_backend.domain.twitch_audience import CHINESE_DISCOVERY_MIN_VIEWERS
+from radar_backend.domain.twitch_tracking import prelaunch_only
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 
@@ -229,6 +230,7 @@ def collect_candidates(
     igdb_predictions = {}
     after = None
     measured_count = below_count = 0
+    prelaunch_ids = set()
     stop_reason = None
 
     def refresh_tracking(game: dict, prediction: dict, at: datetime) -> dict | None:
@@ -469,8 +471,13 @@ def collect_candidates(
         entry = refresh_tracking(game, prediction, hints_clock)
         if entry["status"] != "active":
             continue
+        # Before a Steam release only viewers and channels are counted: the
+        # follower lookups stay within the hourly budget for released games.
+        prelaunch = prelaunch_only(entry)
+        if prelaunch:
+            prelaunch_ids.add(game_id)
         metrics = category_metrics(
-            reader, game_id, max_stream_pages, retain_channels=retain_channels
+            reader, game_id, max_stream_pages, retain_channels=retain_channels and not prelaunch
         )
         channels = metrics.pop("_channels", None)
         measured_count += 1
@@ -635,7 +642,8 @@ def collect_candidates(
             utcnow=(lambda: now) if now else None,
         )
         follower_coverage = attach_filtered_audience(
-            list(measured_rows.values()), channels_by_game, resolver,
+            [row for row in measured_rows.values() if row["game_id"] in channels_by_game],
+            channels_by_game, resolver,
             regional_channels_by_game=regional_channels,
         )
         finished = now or datetime_type.now(timezone_type.utc)
@@ -742,11 +750,13 @@ def collect_candidates(
             "tracked_outside_discovery_count": sum(
                 (row["game_id"] not in candidates_by_id for row in tracked)
             ),
+            "tracked_before_release_count": len(prelaunch_ids),
             "tracking_note": (
-                "Twitch new-game discovery and Steam releases within 30 days independently admit "
-                "categories. Active source memberships are unioned by Twitch ID and measured "
-                "once; directory absence, viewer decline and badge disappearance do not remove "
-                "active memberships."
+                "Twitch new-game discovery and Steam games from 14 days before to 30 days after "
+                "release independently admit categories. Active source memberships are unioned "
+                "by Twitch ID and measured once; directory absence, viewer decline and badge "
+                "disappearance do not remove active memberships. Games kept only by a Steam "
+                "release still to come are counted without follower lookups."
             ),
         },
         "candidate_games": candidates,

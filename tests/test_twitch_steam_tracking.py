@@ -1,5 +1,5 @@
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -10,6 +10,7 @@ from collectors.twitch_tracking import (
     enroll_observation, enroll_steam_mapping, normalize_tracking_state,
     reconcile_steam_catalog, reconcile_tracking_entry,
 )
+from radar_backend.domain.twitch_tracking import prelaunch_only
 from tests.test_twitch_candidates import NOW, FakeClient, game, observed, page, registry, stream, stub_hints
 from tests.test_twitch_tracking import initial_state
 
@@ -136,7 +137,7 @@ def test_catalog_removal_or_delayed_steam_release_keeps_independent_twitch_sourc
     reconcile_steam_catalog(state, [], {"games": {}}, NOW)
     assert entry["status"] == "active"
     assert entry["tracking_sources"]["steam:100"]["status_reason"] == "steam_not_in_catalog"
-    delayed = catalog(steam_row(released=NOW + timedelta(days=2)))
+    delayed = catalog(steam_row(released=NOW + timedelta(days=20)))
     reconcile_steam_catalog(state, normalize_steam_catalog(delayed, NOW), mapping_state(delayed), NOW)
     assert entry["status"] == "active"
     assert entry["tracking_sources"]["steam:100"]["status_reason"] == "steam_not_released"
@@ -156,7 +157,7 @@ def test_confirmed_mapping_change_moves_only_steam_membership():
 
 def test_upcoming_steam_mapping_enriches_twitch_but_does_not_enroll_steam(tmp_path, monkeypatch):
     stub_mapping(monkeypatch)
-    future = catalog(steam_row(released=NOW + timedelta(hours=1)))
+    future = catalog(steam_row(released=NOW + timedelta(days=15)))
     client = FakeClient([("games/top", page([game(1, "101")])), ("streams", page([]))])
     result = collect(tmp_path, client, future, initial_state())
     row = result["tracked_games"][0]
@@ -209,7 +210,7 @@ def test_steam_retention_cannot_bypass_old_global_twitch_admission_filter(tmp_pa
 
 def test_first_twitch_admission_enriched_by_upcoming_steam_mapping_same_run(tmp_path, monkeypatch):
     stub_mapping(monkeypatch)
-    future = catalog(steam_row(released=NOW + timedelta(days=5)))
+    future = catalog(steam_row(released=NOW + timedelta(days=20)))
     client = FakeClient([("games/top", page([game(1, "101")])), ("streams", page([stream(1, 11, 8000)]))])
     result = collect_candidates(client_id="test", client_secret="test", client=client, now=NOW,
                                 registry_path=registry(tmp_path, {"1": observed("new")}),
@@ -218,3 +219,64 @@ def test_first_twitch_admission_enriched_by_upcoming_steam_mapping_same_run(tmp_
     assert row["steam_matches"][0]["display_name"] == "繁中遊戲"
     assert set(row["tracking"]["tracking_sources"]) == {"twitch_new"}
     assert result["tracking_state"]["games"]["1"]["last_observation"]["steam_matches"] == row["steam_matches"]
+
+
+def test_steam_game_is_tracked_two_weeks_before_release_and_switches_at_launch():
+    state = normalize_tracking_state(None, NOW)
+    steam = normalize_steam_catalog(catalog(steam_row(released=NOW + timedelta(days=3))), NOW)[0]
+    released = datetime.fromisoformat(steam["release_at"].replace("Z", "+00:00"))
+    entry = enroll_steam_mapping(state, mapping_for(steam), NOW)
+    source = entry["tracking_sources"]["steam:100"]
+    assert entry["status"] == "active" and entry["status_reason"] == "steam_pre_release"
+    assert source["status"] == "active" and source["status_reason"] == "steam_pre_release"
+    assert source["enrollment"]["observed_at"] == timestamp(NOW)
+    assert entry["expires_at"] == timestamp(released + timedelta(days=30))
+    assert prelaunch_only(entry)
+    reconcile_tracking_entry(entry, released)
+    assert source["status_reason"] == entry["status_reason"] == "steam_recent_release"
+    assert not prelaunch_only(entry)
+
+
+def test_delayed_release_pauses_prelaunch_tracking_and_keeps_the_first_receipt():
+    from radar_backend.domain.twitch_archive import qualified_archive_sources
+    state = normalize_tracking_state(None, NOW)
+    first = catalog(steam_row(released=NOW + timedelta(days=3)))
+    reconcile_steam_catalog(state, normalize_steam_catalog(first, NOW), mapping_state(first), NOW)
+    entry = state["games"]["1"]
+    receipt = deepcopy(entry["tracking_sources"]["steam:100"]["enrollment"])
+    delayed = catalog(steam_row(released=NOW + timedelta(days=20)))
+    reconcile_steam_catalog(state, normalize_steam_catalog(delayed, NOW), mapping_state(delayed), NOW)
+    assert entry["status"] == "expired"
+    assert entry["tracking_sources"]["steam:100"]["status_reason"] == "steam_not_released"
+    later = NOW + timedelta(days=6, hours=1)
+    reconcile_steam_catalog(state, normalize_steam_catalog(delayed, later), mapping_state(delayed), later)
+    assert entry["status"] == "active" and entry["status_reason"] == "steam_pre_release"
+    assert entry["tracking_sources"]["steam:100"]["enrollment"] == receipt
+    assert qualified_archive_sources("1", entry) == ["steam:100"]
+
+
+@pytest.mark.parametrize("twitch_member", [False, True])
+def test_prelaunch_steam_game_is_counted_without_follower_lookups(tmp_path, monkeypatch, twitch_member):
+    from collectors.twitch_audience import FollowerResolver
+    from scripts.store_twitch_snapshot import validate_snapshot
+    stub_mapping(monkeypatch)
+    looked_up = []
+    monkeypatch.setattr(FollowerResolver, "resolve", lambda self, user_id: looked_up.append(user_id) or 2001)
+    upcoming = catalog(steam_row(released=NOW + timedelta(days=5)))
+    client = FakeClient([("games/top", page([])), ("games", page([game(1, "101")])),
+                         ("streams", page([stream(1, 11, 300)]))])
+    result = collect(tmp_path, client, upcoming, initial_state() if twitch_member else None,
+                     include_filtered_audience=True, followers_cache_path=tmp_path / "followers.json")
+    row = result["tracked_games"][0]
+    assert row["viewer_count"] == 300 and row["streamer_count"] == 1
+    assert row["tracking"]["tracking_sources"]["steam:100"]["status_reason"] == "steam_pre_release"
+    if twitch_member:
+        # Another active membership keeps the full census with followers.
+        assert looked_up == ["11"] and row["filtered_audience"]["status"] == "complete"
+        assert result["coverage"]["tracked_before_release_count"] == 0
+    else:
+        assert looked_up == [] and "filtered_audience" not in row
+        assert row["tracking"]["status_reason"] == "steam_pre_release"
+        assert result["coverage"]["tracked_before_release_count"] == 1
+        assert result["coverage"]["filtered_audience"]["complete_categories"] == 0
+    validate_snapshot(result)

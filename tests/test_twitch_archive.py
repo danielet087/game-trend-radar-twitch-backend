@@ -24,7 +24,11 @@ def test_steam_admission_uses_its_original_release_window_without_a_viewer_thres
     }}
     entry['tracking_sources'] = {'steam:100': source}
     assert qualified_archive_sources('42', entry) == ['steam:100']
-    for observed in ['2026-08-31T23:59:59Z', '2026-10-01T00:00:00Z']:
+    # Steam games are tracked from two weeks before their release.
+    for observed in ['2026-08-18T00:00:00Z', '2026-08-31T23:59:59Z']:
+        source['enrollment']['observed_at'] = observed
+        assert qualified_archive_sources('42', entry) == ['steam:100']
+    for observed in ['2026-08-17T23:59:59Z', '2026-10-01T00:00:00Z']:
         source['enrollment']['observed_at'] = observed
         assert qualified_archive_sources('42', entry) == []
     source['enrollment']['observed_at'] = '2026-09-02T00:00:00Z'

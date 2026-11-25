@@ -140,7 +140,8 @@ def test_expired_badge_is_tested_at_explicit_eligibility_time(owner, allow):
 
 
 @pytest.mark.parametrize(
-    "days,active", [(-1, False), (0, True), (29, True), (30, False), (31, False)]
+    "days,active",
+    [(-15, False), (-14, True), (-1, True), (0, True), (29, True), (30, False), (31, False)],
 )
 def test_steam_release_membership_window(owner, days, active):
     state = owner.normalize_tracking_state(None, NOW)
@@ -152,6 +153,8 @@ def test_steam_release_membership_window(owner, days, active):
     if active:
         assert entry is state["games"]["1"]
         assert set(entry["tracking_sources"]) == {"steam:100"}
+        assert entry["status"] == "active"
+        assert entry["status_reason"] == ("steam_pre_release" if days < 0 else "steam_recent_release")
         entry["tracking_sources"]["steam:100"]["steam"]["tags"].append("Local")
         assert mapping == before
 
