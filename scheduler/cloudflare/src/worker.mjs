@@ -217,7 +217,11 @@ function hourAttempts(runs, slot, now) {
   return matching;
 }
 
-export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetch } = {}) {
+// retry: a later tick of the same hour (:15, :30). It only recovers an hour the
+// :05 check never started (its Cron delivery or a GitHub request failed) or
+// whose runs all failed; a run that finished green is left to the workflow's
+// own database guard, so a slow deploy of its receipt starts no second run.
+export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetch, retry = false } = {}) {
   const settings = config(env);
   const slot = hourSlot(now);
   const base = { target_slot: slot };
@@ -236,6 +240,9 @@ export async function checkAndDispatch(env, { now = Date.now(), fetchImpl = fetc
   if (justStarted) return { ...base, action: "wait", reason: "workflow_active", run_id: justStarted.id };
   const attempts = hourAttempts(runs, slot, now);
   const attemptCount = attempts.reduce((count, run) => count + run.run_attempt, 0);
+  if (retry && attempts.some((run) => run.status === "completed" && run.conclusion === "success")) {
+    return { ...base, action: "skip", reason: "collected_this_hour", attempts: attemptCount };
+  }
   if (attemptCount >= MAX_ATTEMPTS) return { ...base, action: "wait", reason: "hourly_attempt_limit", attempts: attemptCount };
   // A successful Actions run without a published receipt is not collection success.
   // Give both failures and delayed publication ten minutes before trying again.
@@ -324,6 +331,17 @@ function minuteSlot(time) {
 
 function taipeiDay(time) {
   return new Date(clockEpoch(time) + 8 * HOUR_MS).toISOString().slice(0, 10);
+}
+
+// Twitch is checked again at :15 and :30, after that minute's own jobs, so one
+// failed :05 tick cannot lose an hour of live data (2026-11-26 00:05 Taipei
+// dispatched nothing). checkAndDispatch's retry rule starts no second run.
+export const TWITCH_RETRY_MINUTES = Object.freeze([15, 30]);
+
+export function twitchRetry(time) {
+  const epoch = clockEpoch(time);
+  return TWITCH_RETRY_MINUTES.includes(new Date(epoch).getUTCMinutes())
+    ? [{ job_id: "twitch", target_slot: hourSlot(epoch), retry: true }] : [];
 }
 
 export function scheduledJobs(time) {
@@ -507,8 +525,10 @@ async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
   }
 }
 
+// retryTwitch: the :15/:30 Twitch recovery (on in production; the tests of the
+// other jobs leave it out so they see only their own tick).
 export async function checkScheduledJobs(env, {
-  now = Date.now(), scheduledTime = now, fetchImpl = fetch,
+  now = Date.now(), scheduledTime = now, fetchImpl = fetch, retryTwitch = true,
 } = {}) {
   const epoch = clockEpoch(now);
   const scheduledEpoch = clockEpoch(scheduledTime);
@@ -519,7 +539,7 @@ export async function checkScheduledJobs(env, {
   // Select only the original Cron minute's jobs, even when delivery is a little
   // late. Hourly observations cannot cross an hour; daily tasks cannot cross
   // their Taiwan date. Preserve the original due instant in workflow inputs.
-  const due = scheduledJobs(scheduledEpoch);
+  const due = [...scheduledJobs(scheduledEpoch), ...(retryTwitch ? twitchRetry(scheduledEpoch) : [])];
   if (!due.length) return [{ action: "skip", reason: "no_job_due" }];
   const enabled = enabledJobIds(env);
   let settings;
@@ -530,7 +550,7 @@ export async function checkScheduledJobs(env, {
   }
   // Isolate failures: an inaccessible Steam or frontend repo cannot disable the
   // working Twitch monitor. Every network request retains timeout/redirect rules.
-  const checkDue = async ({ job_id, target_slot }) => {
+  const checkDue = async ({ job_id, target_slot, retry }) => {
     if (!enabled.has(job_id)) return { job_id, target_slot, action: "skip", reason: "job_staged" };
     const hourly = ["twitch", "steam_catchup", "frontend_insights", "frontend_watchdog", "frontend_pages"].includes(job_id);
     if (hourly ? hourSlot(epoch) !== hourSlot(scheduledEpoch) : taipeiDay(epoch) !== taipeiDay(scheduledEpoch)) {
@@ -538,7 +558,8 @@ export async function checkScheduledJobs(env, {
     }
     try {
       if (job_id === "twitch") {
-        return { job_id, ...await checkAndDispatch(env, { now: epoch, fetchImpl }) };
+        return { job_id, ...await checkAndDispatch(env, { now: epoch, fetchImpl, retry: retry === true }),
+          ...(retry ? { retry: true } : {}) };
       }
       const job = SCHEDULE_JOBS.find((item) => item.id === job_id);
       return await checkAdditionalJob(job, settings, target_slot, fetchImpl, epoch);
