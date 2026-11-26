@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { checkScheduledJobs, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS, tokenExpiryTimestamp } from "../src/worker.mjs";
+import worker, { checkScheduledJobs, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS, tokenExpiryTimestamp, twitchRetry } from "../src/worker.mjs";
 
 const ENV = { GITHUB_ACTIONS_TOKEN: "offline-fixture-only",
   RADAR_ENABLED_JOBS: "steam_daily,steam_catchup,steam_growth,steam_content,steam_descriptions,frontend_insights,nintendo_daily" };
@@ -61,8 +61,9 @@ function fixture({ runs = [], active = {}, activeWorkflows = {}, jobs = [], bloc
   return { fetchImpl, requests, posts: () => requests.filter(({ options }) => options.method === "POST") };
 }
 
-function check(api, when, env = ENV, scheduled = when) {
-  return checkScheduledJobs(env, { now: epoch(when), scheduledTime: epoch(scheduled), fetchImpl: api.fetchImpl });
+// The other jobs' tests see only their own tick; Twitch's :15/:30 recovery has its own tests.
+function check(api, when, env = ENV, scheduled = when, retryTwitch = false) {
+  return checkScheduledJobs(env, { now: epoch(when), scheduledTime: epoch(scheduled), fetchImpl: api.fetchImpl, retryTwitch });
 }
 
 test("Taiwan midnight, year boundaries and daily times produce exact UTC minute slots", () => {
@@ -406,6 +407,64 @@ test("an enabled job with insufficient permission remains blocked rather than as
   const api = fixture({ blockedRepo: "game-trend-radar-backend" });
   assert.equal((await check(api, "2026-10-13T03:00:00+08:00"))[0].reason, "github_runs_http_403");
   assert.equal(api.posts().length, 0);
+});
+
+const HOUR = "2026-10-14T04:00:00Z";
+const twitchRun = (overrides = {}) => run("2026-10-14T04:05:10Z", {
+  display_title: `Collect Twitch | slot=${HOUR} | cloudflare`, updated_at: "2026-10-14T04:12:00Z", ...overrides });
+const twitchAt = async (api, when, retryTwitch = true) =>
+  (await check(api, when, ENV, when, retryTwitch)).filter((item) => item.job_id === "twitch");
+
+test("Twitch is checked again at :15 and :30, after that minute's own jobs", async () => {
+  for (const [when, due] of [["2026-10-14T12:15:00+08:00", true], ["2026-10-14T12:30:00+08:00", true],
+    ["2026-10-14T12:05:00+08:00", false], ["2026-10-14T12:17:00+08:00", false], ["2026-10-14T12:00:00+08:00", false]]) {
+    assert.deepEqual(twitchRetry(epoch(when)), due ? [{ job_id: "twitch", target_slot: HOUR, retry: true }] : []);
+  }
+  // The planned schedule is unchanged: Twitch is due at :05 only.
+  assert.ok(!scheduledJobs("2026-10-14T12:15:00+08:00").some((item) => item.job_id === "twitch"));
+  // The production check includes the recovery, after the tick's own jobs.
+  const api = fixture();
+  const results = await checkScheduledJobs(ENV, { now: epoch("2026-10-14T12:30:00+08:00"),
+    scheduledTime: epoch("2026-10-14T12:30:00+08:00"), fetchImpl: api.fetchImpl });
+  assert.deepEqual(results.map((item) => item.job_id), ["frontend_pages", "twitch"]);
+  assert.equal(results.at(-1).retry, true);
+});
+
+test("a :15 or :30 tick starts an hour the :05 check never started", async () => {
+  // 2026-11-26 00:05 Taipei: the :05 tick dispatched nothing and the hour went uncollected.
+  for (const when of ["2026-10-14T12:15:00+08:00", "2026-10-14T12:30:00+08:00"]) {
+    const api = fixture();
+    assert.deepEqual(await twitchAt(api, when), [{ job_id: "twitch", target_slot: HOUR, action: "dispatch",
+      reason: "missing_published_collection", attempts: 1, retry: true }]);
+    assert.equal(api.posts().length, 1);
+    assert.deepEqual(JSON.parse(api.posts()[0].options.body),
+      { ref: "main", inputs: { target_slot: HOUR, trigger_source: "cloudflare", force: "false" } });
+  }
+});
+
+test("a retry tick starts no second run after a green one and waits for a running one", async () => {
+  // The :05 run finished green; its receipt reaches the site only with the :30 deploy.
+  const green = fixture({ runs: [twitchRun()] });
+  assert.deepEqual(await twitchAt(green, "2026-10-14T12:30:00+08:00"), [{ job_id: "twitch", target_slot: HOUR,
+    action: "skip", reason: "collected_this_hour", attempts: 1, retry: true }]);
+  assert.equal(green.posts().length, 0);
+  const busy = fixture({ active: { in_progress: [twitchRun({ status: "in_progress", conclusion: null })] } });
+  const [running] = await twitchAt(busy, "2026-10-14T12:15:00+08:00");
+  assert.equal(running.reason, "workflow_active");
+  assert.equal(busy.posts().length, 0);
+});
+
+test("a failed :05 run is retried once, ten minutes after it ended", async () => {
+  const failed = { conclusion: "failure", updated_at: "2026-10-14T04:08:00Z" };
+  const soon = fixture({ runs: [twitchRun(failed)] });
+  assert.equal((await twitchAt(soon, "2026-10-14T12:15:00+08:00"))[0].reason, "retry_cooldown");
+  const later = fixture({ runs: [twitchRun(failed)] });
+  const [retried] = await twitchAt(later, "2026-10-14T12:30:00+08:00");
+  assert.deepEqual([retried.action, retried.attempts], ["dispatch", 2]);
+  const twice = fixture({ runs: [twitchRun(failed), twitchRun({ ...failed, id: 23457, created_at: "2026-10-14T04:15:20Z",
+    updated_at: "2026-10-14T04:16:00Z" })] });
+  assert.equal((await twitchAt(twice, "2026-10-14T12:30:00+08:00"))[0].reason, "hourly_attempt_limit");
+  assert.equal(twice.posts().length, 0);
 });
 
 test("Twitch Cron delayed from minute 05 to 06 still inspects only this hour", async () => {

@@ -1,6 +1,6 @@
 # Game Trend Radar 排程控制器（Cloudflare Workers）
 
-十六項定時工作統一由既有 Cloudflare Worker 觸發，使用單一 Cron `0,5,15,17,30 * * * *`，每天 120 個 tick。每次只檢查原定 Cron 分鐘到期的工作：Twitch 每小時第 05 分檢查當小時是否缺少資料，其餘工作依下表執行。Python 與資料發布繼續在 GitHub Actions 執行；Worker 只查狀態與派發 workflow，不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
+十六項定時工作統一由既有 Cloudflare Worker 觸發，使用單一 Cron `0,5,15,17,30 * * * *`，每天 120 個 tick。每次只檢查原定 Cron 分鐘到期的工作：Twitch 每小時第 05 分檢查當小時是否缺少資料，第 15、30 分在該分鐘自己的工作之後再看一次，只補派那一小時還沒開始、或執行都失敗的收集（已成功的交給 workflow 自己的資料庫檢查，不再派第二次）；其餘工作依下表執行。Python 與資料發布繼續在 GitHub Actions 執行；Worker 只查狀態與派發 workflow，不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
 
 ## 正式排程與設定
 
