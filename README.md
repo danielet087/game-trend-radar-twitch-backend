@@ -8,7 +8,7 @@
 
 2026-10-01 **16:44（台灣）** 的[部署收集](https://github.com/danielet087/game-trend-radar-twitch-backend/actions/runs/36837900593)已完成真實 API 查詢並發布，前端 Pages 部署亦成功。當次 106 款 Steam 清單有 104 款日期一致，102 款找到官方 ID 鏈對照；23 款近期上市中 22 款已配對、1 款待配對。既有 24 款 Twitch 追蹤全數保留，加上 Steam 來源後為 39 個類別（7 個來源重疊），當次全部篩選中位數查詢完整。這是該次快照的驗證數量，不是固定清單上限，也不代表官方「全新」標記已自動確認。
 
-2026-10-03 起，六項定時工作統一由既有 [Cloudflare 排程控制器](scheduler/cloudflare/README.md) 觸發。Twitch 仍在每小時第 05 分檢查本小時是否已發布完整基礎量測，缺資料且沒有執行中的工作時才觸發既有 Python workflow。每日 Steam 發現、官方 Followers 補漏、成長追蹤、內容對帳與前端分析亦由同一 Worker 按原時間派發；六項 GitHub 原生 `schedule` 已移除。
+2026-10-03 起，六項定時工作統一由既有 [Cloudflare 排程控制器](scheduler/cloudflare/README.md) 觸發。Twitch 仍在每小時第 05 分檢查本小時是否已發布完整基礎量測，缺資料且沒有執行中的工作時才觸發既有 Python workflow。每日 Steam 發現、官方 Followers 補漏、成長追蹤、內容對帳與前端分析亦由同一 Worker 按原時間派發；六項 GitHub 原生 `schedule` 已移除。官方 Followers 整點沒有派出時，第 15 分補派那一小時（2026-11-27 起；之前 11-26 15:00 那輪沒派出去）。
 
 所有入口共用 workflow concurrency；工作開始後會解析前端最新 git HEAD，讀取該不可變版本的成功紀錄，再判斷是否需要收集。同一小時已有成功發布時直接略過；舊時段延遲排隊的外部請求略過，不回填歷史直播數。手動 Run workflow 預設也防重複，需要重新取樣時才勾選 `force`。
 

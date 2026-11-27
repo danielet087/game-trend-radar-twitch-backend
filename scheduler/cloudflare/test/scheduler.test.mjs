@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { checkScheduledJobs, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS, tokenExpiryTimestamp, twitchRetry } from "../src/worker.mjs";
+import worker, { catchupRetry, checkScheduledJobs, probeSchedulerPermissions, scheduledJobs, SCHEDULE_JOBS, tokenExpiryTimestamp, twitchRetry } from "../src/worker.mjs";
 
 const ENV = { GITHUB_ACTIONS_TOKEN: "offline-fixture-only",
   RADAR_ENABLED_JOBS: "steam_daily,steam_catchup,steam_growth,steam_content,steam_descriptions,frontend_insights,nintendo_daily" };
@@ -61,9 +61,11 @@ function fixture({ runs = [], active = {}, activeWorkflows = {}, jobs = [], bloc
   return { fetchImpl, requests, posts: () => requests.filter(({ options }) => options.method === "POST") };
 }
 
-// The other jobs' tests see only their own tick; Twitch's :15/:30 recovery has its own tests.
-function check(api, when, env = ENV, scheduled = when, retryTwitch = false) {
-  return checkScheduledJobs(env, { now: epoch(when), scheduledTime: epoch(scheduled), fetchImpl: api.fetchImpl, retryTwitch });
+// The other jobs' tests see only their own tick; Twitch's :15/:30 and Followers'
+// :15 recoveries have their own tests.
+function check(api, when, env = ENV, scheduled = when, retryTwitch = false, retryCatchup = false) {
+  return checkScheduledJobs(env, { now: epoch(when), scheduledTime: epoch(scheduled), fetchImpl: api.fetchImpl,
+    retryTwitch, retryCatchup });
 }
 
 test("Taiwan midnight, year boundaries and daily times produce exact UTC minute slots", () => {
@@ -687,6 +689,91 @@ test("growth retries do not replace pending catchups or duplicate their own acti
   } });
   assert.equal((await check(own, "2026-11-25T07:15:00+08:00"))[0].blocking_workflow, "steam-public-growth.yml");
   assert.equal(own.posts().length, 0);
+});
+
+// Official Followers' :15 recovery (2026-11-26 15:00 Taipei: the :00 tick dispatched nothing).
+const followersAt = async (api, when, env = onlyJob("steam_catchup")) =>
+  (await check(api, when, env, when, false, true)).filter((item) => item.job_id === "steam_catchup");
+
+test("Followers is checked again at :15 of its 03:00–23:00 hours, with that hour's :00 slot", async () => {
+  for (const [when, due] of [["2026-12-01T15:15:00+08:00", true], ["2026-12-01T03:15:00+08:00", true],
+    ["2026-12-01T23:15:00+08:00", true], ["2026-12-01T02:15:00+08:00", false], ["2026-12-01T15:30:00+08:00", false],
+    ["2026-12-01T15:00:00+08:00", false], ["2026-12-01T15:05:00+08:00", false]]) {
+    assert.deepEqual(catchupRetry(epoch(when)), due
+      ? [{ job_id: "steam_catchup", target_slot: iso(when.replace(":15:00", ":00:00")), retry: true }] : []);
+  }
+  // The planned schedule is unchanged: Followers is due at :00 only.
+  assert.ok(!scheduledJobs("2026-12-01T15:15:00+08:00").some((item) => item.job_id === "steam_catchup"));
+  // The production check includes both recoveries, after the tick's own jobs.
+  const api = fixture();
+  const results = await checkScheduledJobs(ENV, { now: epoch("2026-12-01T15:15:00+08:00"),
+    scheduledTime: epoch("2026-12-01T15:15:00+08:00"), fetchImpl: api.fetchImpl });
+  assert.deepEqual(results.map((item) => [item.job_id, item.retry]), [["twitch", true], ["steam_catchup", true]]);
+});
+
+test("a :15 tick starts the Followers hour its :00 tick never started", async () => {
+  const api = fixture();
+  assert.deepEqual(await followersAt(api, "2026-12-02T15:15:00+08:00"), [{ job_id: "steam_catchup",
+    target_slot: "2026-12-02T07:00:00Z", action: "dispatch", reason: "scheduled_slot_due", retry: true }]);
+  assert.equal(api.posts().length, 1);
+  assert.ok(api.posts()[0].url.pathname.endsWith("/steam-official-daily-catchup-250.yml/dispatches"));
+  assert.deepEqual(JSON.parse(api.posts()[0].options.body),
+    { ref: "main", inputs: { target_slot: "2026-12-02T07:00:00Z", trigger_source: "cloudflare" } });
+});
+
+test("a :15 Followers check starts no second run for its hour and waits for running Steam work", async () => {
+  for (const [index, conclusion] of ["success", "failure", "cancelled"].entries()) {
+    const date = `2026-12-0${3 + index}`;
+    const api = fixture({ runs: [run(iso(`${date}T15:00:00+08:00`), { created_at: iso(`${date}T15:00:20+08:00`),
+      updated_at: iso(`${date}T15:06:00+08:00`), conclusion })] });
+    const [result] = await followersAt(api, `${date}T15:15:00+08:00`);
+    assert.deepEqual([result.action, result.reason, result.retry],
+      ["skip", conclusion === "success" ? "slot_completed" : "slot_already_attempted", true]);
+    assert.equal(api.posts().length, 0);
+  }
+  for (const [index, blocker] of ["steam-official-daily-catchup-250.yml", "steam-two-phase.yml", "steam-public-growth.yml"].entries()) {
+    const date = `2026-12-0${6 + index}`;
+    const api = fixture({ activeWorkflows: { [blocker]: { in_progress: [run(iso(`${date}T06:00:00+08:00`),
+      { status: "in_progress", conclusion: null })] } } });
+    const [result] = await followersAt(api, `${date}T06:15:00+08:00`);
+    assert.deepEqual([result.action, result.reason, result.blocking_workflow], ["wait", "workflow_active", blocker]);
+    assert.equal(api.posts().length, 0);
+  }
+});
+
+test("growth goes first at 07:15/13:15/19:15; Followers starts only when growth is done for the day", async () => {
+  for (const [index, hour] of [7, 13, 19].entries()) {
+    const at = (date, minute = "15") => `${date}T${String(hour).padStart(2, "0")}:${minute}:00+08:00`;
+    const pending = fixture();
+    const results = await check(pending, at(`2026-12-${10 + index}`), ENV, undefined, false, true);
+    assert.deepEqual(results.map((item) => [item.job_id, item.action, item.reason]),
+      [["steam_growth", "dispatch", "scheduled_slot_due"], ["steam_catchup", "wait", "growth_priority"]]);
+    assert.equal(pending.posts().length, 1);
+    assert.ok(pending.posts()[0].url.pathname.includes("/steam-public-growth.yml/dispatches"));
+    const date = `2026-12-${20 + index}`;
+    const done = fixture({ runs: [run(iso(`${date}T01:15:00+08:00`))], jobs: [coverageGate] });
+    const after = await check(done, at(date), ENV, undefined, false, true);
+    assert.deepEqual(after.map((item) => [item.job_id, item.action, item.reason]),
+      [["steam_growth", "skip", "day_already_completed"], ["steam_catchup", "dispatch", "scheduled_slot_due"]]);
+    assert.equal(done.posts().length, 1);
+    assert.equal(JSON.parse(done.posts()[0].options.body).inputs.target_slot, iso(at(date, "00")));
+  }
+});
+
+test("a :00 Followers dispatch lost in this isolate is decided at :15 by GitHub's run list", async () => {
+  const lost = fixture({ dispatchError: true });
+  assert.equal((await check(lost, "2026-12-15T15:00:00+08:00", onlyJob("steam_catchup")))[0].reason,
+    "github_dispatch_unavailable");
+  const later = fixture();
+  const [retried] = await followersAt(later, "2026-12-15T15:15:00+08:00");
+  assert.deepEqual([retried.action, retried.reason, retried.retry], ["dispatch", "scheduled_slot_due", true]);
+  assert.equal(later.posts().length, 1);
+  // An attempt less than ten minutes earlier (a late :00 delivery) still holds the slot.
+  await check(fixture({ dispatchError: true }), "2026-12-16T15:06:00+08:00", onlyJob("steam_catchup"),
+    "2026-12-16T15:00:00+08:00");
+  const held = fixture();
+  assert.equal((await followersAt(held, "2026-12-16T15:15:00+08:00"))[0].reason, "slot_dispatch_attempted");
+  assert.equal(held.posts().length, 0);
 });
 
 test("the site deploys every hour at :30 and a delivery late into the next hour is skipped", async () => {

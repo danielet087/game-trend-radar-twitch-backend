@@ -344,6 +344,22 @@ export function twitchRetry(time) {
     ? [{ job_id: "twitch", target_slot: hourSlot(epoch), retry: true }] : [];
 }
 
+// Official Followers (steam_catchup) is checked again at :15 of its 03:00–23:00
+// hours, so one failed :00 tick cannot lose an hour's six requests (2026-11-26
+// 15:00 Taipei dispatched nothing). It reuses that hour's :00 slot, which the
+// backend accepts until the hour ends, and starts nothing when the slot already
+// has a run of any result. Growth, due at 07:15/13:15/19:15, is checked first.
+// Not exported: workerd accepts only functions and objects as module exports.
+const CATCHUP_RETRY_MINUTE = 15;
+
+export function catchupRetry(time) {
+  const epoch = clockEpoch(time);
+  const taipeiHour = new Date(epoch + 8 * HOUR_MS).getUTCHours();
+  const { taipeiHours } = SCHEDULE_JOBS.find((job) => job.id === "steam_catchup");
+  return new Date(epoch).getUTCMinutes() === CATCHUP_RETRY_MINUTE && taipeiHours.includes(taipeiHour)
+    ? [{ job_id: "steam_catchup", target_slot: hourSlot(epoch), retry: true }] : [];
+}
+
 export function scheduledJobs(time) {
   const epoch = clockEpoch(time);
   const minute = new Date(epoch).getUTCMinutes();
@@ -464,13 +480,19 @@ const inflightJobs = new Set();
 const attemptedSlots = new Map();
 const SLOT_MEMORY_MS = 48 * HOUR_MS;
 
-async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
+async function checkAdditionalJob(job, settings, slot, fetchImpl, now, retry = false) {
   const base = { job_id: job.id, target_slot: slot };
   const key = `${job.id}:${slot}`;
   for (const [oldKey, attemptedAt] of attemptedSlots) {
     if (now - attemptedAt > SLOT_MEMORY_MS) attemptedSlots.delete(oldKey);
   }
-  if (attemptedSlots.has(key)) return { ...base, action: "wait", reason: "slot_dispatch_attempted" };
+  // A retry (Followers at :15) that comes ten minutes or more after this
+  // isolate's own attempt lets GitHub's run history decide: by then it lists any
+  // run that attempt created, and the slot check below starts no second one.
+  const attemptedAt = attemptedSlots.get(key);
+  if (attemptedAt !== undefined && !(retry && now - attemptedAt >= COOLDOWN_MS)) {
+    return { ...base, action: "wait", reason: "slot_dispatch_attempted" };
+  }
   if (inflightJobs.has(job.id)) return { ...base, action: "wait", reason: "controller_check_active" };
   inflightJobs.add(job.id);
   try {
@@ -525,10 +547,11 @@ async function checkAdditionalJob(job, settings, slot, fetchImpl, now) {
   }
 }
 
-// retryTwitch: the :15/:30 Twitch recovery (on in production; the tests of the
-// other jobs leave it out so they see only their own tick).
+// retryTwitch / retryCatchup: the :15/:30 Twitch and :15 Followers recoveries
+// (on in production; the tests of the other jobs leave them out so they see
+// only their own tick).
 export async function checkScheduledJobs(env, {
-  now = Date.now(), scheduledTime = now, fetchImpl = fetch, retryTwitch = true,
+  now = Date.now(), scheduledTime = now, fetchImpl = fetch, retryTwitch = true, retryCatchup = true,
 } = {}) {
   const epoch = clockEpoch(now);
   const scheduledEpoch = clockEpoch(scheduledTime);
@@ -539,7 +562,8 @@ export async function checkScheduledJobs(env, {
   // Select only the original Cron minute's jobs, even when delivery is a little
   // late. Hourly observations cannot cross an hour; daily tasks cannot cross
   // their Taiwan date. Preserve the original due instant in workflow inputs.
-  const due = [...scheduledJobs(scheduledEpoch), ...(retryTwitch ? twitchRetry(scheduledEpoch) : [])];
+  const due = [...scheduledJobs(scheduledEpoch), ...(retryTwitch ? twitchRetry(scheduledEpoch) : []),
+    ...(retryCatchup ? catchupRetry(scheduledEpoch) : [])];
   if (!due.length) return [{ action: "skip", reason: "no_job_due" }];
   const enabled = enabledJobIds(env);
   let settings;
@@ -562,23 +586,25 @@ export async function checkScheduledJobs(env, {
           ...(retry ? { retry: true } : {}) };
       }
       const job = SCHEDULE_JOBS.find((item) => item.id === job_id);
-      return await checkAdditionalJob(job, settings, target_slot, fetchImpl, epoch);
+      const result = await checkAdditionalJob(job, settings, target_slot, fetchImpl, epoch, retry === true);
+      return retry ? { ...result, retry: true } : result;
     } catch (error) {
       return { job_id, target_slot, action: "blocked", reason: safeReason(error) };
     }
   };
-  // Daily retry slots share the minute with hourly Followers catchup. Check daily
-  // first so catchup cannot race its state refresh before GitHub exposes the run.
-  const dailyDue = due.find((item) => item.job_id === "steam_daily" && enabled.has(item.job_id));
-  if (!dailyDue) return Promise.all(due.map(checkDue));
-  const dailyResult = await checkDue(dailyDue);
-  const remaining = await Promise.all(due.filter((item) => item !== dailyDue).map((item) => {
-    if (item.job_id === "steam_catchup" && dailyResult.action !== "skip") {
-      return { ...item, action: "wait", reason: "daily_refresh_priority", blocking_workflow: "steam-two-phase.yml" };
-    }
-    return checkDue(item);
-  }));
-  return [dailyResult, ...remaining];
+  // Daily retry slots (:00) and growth (:15) share their minute with Followers
+  // catchup (hourly at :00, its recovery at :15). Check them first so catchup
+  // cannot race their state refresh before GitHub exposes the run.
+  const first = { steam_daily: ["daily_refresh_priority", "steam-two-phase.yml"],
+    steam_growth: ["growth_priority", "steam-public-growth.yml"] };
+  const firstDue = due.find((item) => first[item.job_id] && enabled.has(item.job_id));
+  if (!firstDue) return Promise.all(due.map(checkDue));
+  const firstResult = checkDue(firstDue);
+  const [reason, blockingWorkflow] = first[firstDue.job_id];
+  // Only catchup waits for that decision; the tick's other jobs run alongside.
+  return Promise.all([firstResult, ...due.filter((item) => item !== firstDue).map((item) =>
+    item.job_id !== "steam_catchup" ? checkDue(item) : firstResult.then((result) => result.action === "skip"
+      ? checkDue(item) : { ...item, action: "wait", reason, blocking_workflow: blockingWorkflow }))]);
 }
 
 export async function probeSchedulerPermissions(env, { fetchImpl = fetch } = {}) {

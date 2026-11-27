@@ -1,6 +1,6 @@
 # Game Trend Radar 排程控制器（Cloudflare Workers）
 
-十六項定時工作統一由既有 Cloudflare Worker 觸發，使用單一 Cron `0,5,15,17,30 * * * *`，每天 120 個 tick。每次只檢查原定 Cron 分鐘到期的工作：Twitch 每小時第 05 分檢查當小時是否缺少資料，第 15、30 分在該分鐘自己的工作之後再看一次，只補派那一小時還沒開始、或執行都失敗的收集（已成功的交給 workflow 自己的資料庫檢查，不再派第二次）；其餘工作依下表執行。Python 與資料發布繼續在 GitHub Actions 執行；Worker 只查狀態與派發 workflow，不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
+十六項定時工作統一由既有 Cloudflare Worker 觸發，使用單一 Cron `0,5,15,17,30 * * * *`，每天 120 個 tick。每次只檢查原定 Cron 分鐘到期的工作：Twitch 每小時第 05 分檢查當小時是否缺少資料，第 15、30 分在該分鐘自己的工作之後再看一次，只補派那一小時還沒開始、或執行都失敗的收集（已成功的交給 workflow 自己的資料庫檢查，不再派第二次）；官方 Followers（`steam_catchup`）第 15 分也再看一次，只補派那一小時整點完全沒有派出的那一輪（2026-11-27 起）；其餘工作依下表執行。Python 與資料發布繼續在 GitHub Actions 執行；Worker 只查狀態與派發 workflow，不需要 KV、D1 或常駐伺服器，也沒有可由網頁呼叫的執行端點。
 
 ## 正式排程與設定
 
@@ -10,7 +10,7 @@
 | --- | --- | --- | --- | --- |
 | `twitch` | 每小時第 05 分 | `game-trend-radar-twitch-backend` | `collect.yml`（ID `369223512`） | `force=false` |
 | `steam_daily` | 每日 00:00／06:00／12:00／18:00 檢查，當日成功後略過 | `game-trend-radar-backend` | `steam-two-phase.yml` | `refresh_today=true` |
-| `steam_catchup` | 每日 03:00–23:00，每小時整點 | `game-trend-radar-backend` | `steam-official-daily-catchup-250.yml` | — |
+| `steam_catchup` | 每日 03:00–23:00，每小時整點；第 15 分補派整點沒有派出的那一小時 | `game-trend-radar-backend` | `steam-official-daily-catchup-250.yml` | — |
 | `steam_growth` | 每日 01:15／07:15／13:15／19:15 檢查，當日成功後略過 | `game-trend-radar-backend` | `steam-public-growth.yml` | — |
 | `steam_content` | 每日 07:30、19:30 | `game-trend-radar-content-backend` | `steam-catalog-reconcile.yml` | — |
 | `steam_descriptions` | 每日 01:30／07:30／13:30／19:30 | `game-trend-radar-content-backend` | `steam-description-refresh.yml` | — |
@@ -43,9 +43,9 @@ Worker 每小時派發看門狗時，會用 `GET /rate_limit`（不耗額度）�
 
 可使用 `probeSchedulerPermissions(env)` 做 read-only 檢查：它只 GET 固定 workflow，對每個目的回報讀取結果，完全不 dispatch。GET 成功只能確認 Actions 讀取與 workflow 存在，**不能證明 Actions write 權限**；實際派發被拒絕時仍會以 403 停止該工作，不會改派其他目的地。
 
-單一 Cron 每天產生 120 個 tick，每次只查原定 Cron 分鐘到期的工作，Twitch 不會因 00、15、17、30 分的 tick 額外重試。延遲到同一小時內的 Twitch、Followers 補漏與前端分析仍可執行；跨小時則略過，避免補造舊時段觀測。每日刷新、成長與內容工作僅接受原定台灣日期內的延遲，不跨日補跑。傳入 workflow 的 slot 始終是原定到期時刻；Twitch 收集仍記錄實際量測時間。
+單一 Cron 每天產生 120 個 tick，每次只查原定 Cron 分鐘到期的工作；額外的檢查只有 Twitch 第 15、30 分（那一小時還沒收集或收集都失敗）與官方 Followers 第 15 分（那一小時整點沒有派出），其他分鐘不重試。延遲到同一小時內的 Twitch、Followers 補漏與前端分析仍可執行；跨小時則略過，避免補造舊時段觀測。每日刷新、成長與內容工作僅接受原定台灣日期內的延遲，不跨日補跑。傳入 workflow 的 slot 始終是原定到期時刻；Twitch 收集仍記錄實際量測時間。
 
-Twitch 以外的工作會查 active 狀態與分頁執行紀錄。同 slot 已嘗試不重送；每日候選與 Steam 成長另每六小時檢查，當天任一完整成功便跳過後續時段，失敗／取消／未執行則在下一檢查時段重試，仍在排隊或執行時等待。日期以 Asia/Taipei 計算，讀取範圍從當日午夜開始，不把前日成功沿用到今天。每日候選只採信當日有效排程 slot，手動的一個批次續跑不算每日刷新成功；同日重試續用已保存的候選進度，不再次重設。成長需該次 run 的 `Require complete growth coverage` 步驟成功，429、部分量測、錯誤或覆蓋不足會在保存／發布成果後使 workflow 失敗，舊版顯示成功卻沒有此驗證的 run 不阻止重試。成長／Followers 另查同 concurrency 群組的已知工作；07:15／13:15／19:15 成長重試可排在正在執行的 Followers 後面，由共用 GitHub concurrency 鎖依序執行，避免每次重試都撞上整點收集而無法啟動；若已有排隊／等待中的工作則不再派發。候選重試會先等待既有成長或官方 Followers 工作結束；候選重試與整點 Followers 同時到期時先檢查候選，候選需執行或等待時該輪 Followers 等待，避免尚未可見的派發競爭。三個相關手動一次性 workflow 僅列為 active blockers，不列入排程或 dispatch 清單。
+Twitch 以外的工作會查 active 狀態與分頁執行紀錄。同 slot 已嘗試不重送；每日候選與 Steam 成長另每六小時檢查，當天任一完整成功便跳過後續時段，失敗／取消／未執行則在下一檢查時段重試，仍在排隊或執行時等待。日期以 Asia/Taipei 計算，讀取範圍從當日午夜開始，不把前日成功沿用到今天。每日候選只採信當日有效排程 slot，手動的一個批次續跑不算每日刷新成功；同日重試續用已保存的候選進度，不再次重設。成長需該次 run 的 `Require complete growth coverage` 步驟成功，429、部分量測、錯誤或覆蓋不足會在保存／發布成果後使 workflow 失敗，舊版顯示成功卻沒有此驗證的 run 不阻止重試。成長／Followers 另查同 concurrency 群組的已知工作；07:15／13:15／19:15 成長重試可排在正在執行的 Followers 後面，由共用 GitHub concurrency 鎖依序執行，避免每次重試都撞上整點收集而無法啟動；若已有排隊／等待中的工作則不再派發。候選重試會先等待既有成長或官方 Followers 工作結束；候選重試與整點 Followers 同時到期時先檢查候選，候選需執行或等待時該輪 Followers 等待，避免尚未可見的派發競爭。Followers 第 15 分的補派也一樣：07:15／13:15／19:15 先檢查成長，成長需執行或等待時那一小時的 Followers 等待；補派沿用同一小時整點的 slot（後端到該小時結束前都接受），那個 slot 已有任何執行（成功、失敗或取消）就不再派；本 isolate 在整點嘗試過、但已過 10 分鐘時，改由 GitHub 執行紀錄判斷。三個相關手動一次性 workflow 僅列為 active blockers，不列入排程或 dispatch 清單。
 
 缺少 Secret、目的地設定不符、403、重新導向或不完整回應都會阻擋該工作；某個儲存庫的權限問題不會停用既有 Twitch 工作。Worker 在同一 isolate 內另有進行中檢查與已派發 slot 保護，HTTP timeout 也不盲目重送。這是記憶體保護，不能代替 workflow 持久 slot guard，也不宣稱跨 isolate 的 exactly-once。
 
@@ -168,6 +168,7 @@ Worker 結構化日誌只包含結果代碼、時段與執行 ID，不輸出 tok
 | `skip` / `slot_completed` | 同 slot 已有成功執行紀錄 |
 | `skip` / `day_already_completed` | 每日候選或成長在同一台灣日期已完整成功，後續六小時檢查略過 |
 | `wait` / `daily_refresh_priority` | 同分鐘候選需重試／等待，Followers 補漏等待下一輪 |
+| `wait` / `growth_priority` | 第 15 分成長需執行／等待，該小時的 Followers 補派等待 |
 | `skip` / `slot_already_attempted` | 同 slot 已有執行紀錄，即使失敗也不自動重送 |
 | `wait` / `slot_dispatch_attempted` | 本 isolate 已嘗試派發同 slot，避免 timeout 後盲目重送 |
 | `skip` / `stale_cron_delivery` | 延遲事件已跨過工作允許的小時或台灣日期 |
